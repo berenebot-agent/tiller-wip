@@ -7,37 +7,32 @@ RUN apk add --no-cache ca-certificates
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY . .
-RUN --mount=type=cache,target=/go/pkg/mod \
-    mkdir -p /out/licenses && \
-    cp LICENSE /out/licenses/TILLER-LICENSE && \
-    cp THIRD_PARTY_NOTICES.md /out/licenses/THIRD_PARTY_NOTICES.md && \
-    cp /go/pkg/mod/golang.org/x/crypto@v0.57.0/LICENSE /out/licenses/golang.org-x-crypto-LICENSE && \
-    cp /go/pkg/mod/github.com/go-webauthn/webauthn@v0.18.2/LICENSE /out/licenses/github.com-go-webauthn-webauthn-LICENSE && \
-    cp /go/pkg/mod/github.com/go-webauthn/x@v0.3.1/LICENSE /out/licenses/github.com-go-webauthn-x-LICENSE && \
-    cp /go/pkg/mod/github.com/fxamacker/cbor/v2@v2.9.4/LICENSE /out/licenses/github.com-fxamacker-cbor-LICENSE && \
-    cp /go/pkg/mod/github.com/go-viper/mapstructure/v2@v2.5.0/LICENSE /out/licenses/github.com-go-viper-mapstructure-LICENSE && \
-    cp /go/pkg/mod/github.com/golang-jwt/jwt/v5@v5.3.1/LICENSE /out/licenses/github.com-golang-jwt-jwt-LICENSE && \
-    cp /go/pkg/mod/github.com/google/go-tpm@v0.9.8/LICENSE /out/licenses/github.com-google-go-tpm-LICENSE && \
-    cp /go/pkg/mod/github.com/tinylib/msgp@v1.6.4/LICENSE /out/licenses/github.com-tinylib-msgp-LICENSE && \
-    cp /go/pkg/mod/github.com/philhofer/fwd@v1.2.0/LICENSE.md /out/licenses/github.com-philhofer-fwd-LICENSE && \
-    cp /go/pkg/mod/github.com/x448/float16@v0.8.4/LICENSE /out/licenses/github.com-x448-float16-LICENSE && \
-    cp /go/pkg/mod/github.com/dustin/go-humanize@v1.0.1/LICENSE /out/licenses/github.com-dustin-go-humanize-LICENSE && \
-    cp /go/pkg/mod/github.com/google/uuid@v1.6.0/LICENSE /out/licenses/github.com-google-uuid-LICENSE && \
-    cp /go/pkg/mod/github.com/mattn/go-isatty@v0.0.20/LICENSE /out/licenses/github.com-mattn-go-isatty-LICENSE && \
-    cp /go/pkg/mod/github.com/ncruces/go-strftime@v0.1.9/LICENSE /out/licenses/github.com-ncruces-go-strftime-LICENSE && \
-    cp /go/pkg/mod/github.com/remyoudompheng/bigfft@v0.0.0-20230129092748-24d4a6f8daec/LICENSE /out/licenses/github.com-remyoudompheng-bigfft-LICENSE && \
-    cp /go/pkg/mod/golang.org/x/exp@v0.0.0-20250620022241-b7579e27df2b/LICENSE /out/licenses/golang.org-x-exp-LICENSE && \
-    cp /go/pkg/mod/golang.org/x/sys@v0.48.0/LICENSE /out/licenses/golang.org-x-sys-LICENSE && \
-    cp /go/pkg/mod/modernc.org/sqlite@v1.39.1/LICENSE /out/licenses/modernc.org-sqlite-LICENSE && \
-    cp /go/pkg/mod/modernc.org/libc@v1.66.10/LICENSE /out/licenses/modernc.org-libc-LICENSE && \
-    cp /go/pkg/mod/modernc.org/libc@v1.66.10/LICENSE-GO /out/licenses/modernc.org-libc-LICENSE-GO && \
-    cp /go/pkg/mod/modernc.org/mathutil@v1.7.1/LICENSE /out/licenses/modernc.org-mathutil-LICENSE && \
-    cp /go/pkg/mod/modernc.org/mathutil@v1.7.1/mersenne/LICENSE /out/licenses/modernc.org-mathutil-mersenne-LICENSE && \
-    cp /go/pkg/mod/modernc.org/memory@v1.11.0/LICENSE /out/licenses/modernc.org-memory-LICENSE && \
-    cp /go/pkg/mod/modernc.org/memory@v1.11.0/LICENSE-GO /out/licenses/modernc.org-memory-LICENSE-GO && \
-    cp /go/pkg/mod/modernc.org/memory@v1.11.0/LICENSE-LOGO /out/licenses/modernc.org-memory-LICENSE-LOGO && \
-    cp /go/pkg/mod/modernc.org/memory@v1.11.0/LICENSE-MMAP-GO /out/licenses/modernc.org-memory-LICENSE-MMAP-GO && \
-    cp internal/web/assets/D3-LICENSE /out/licenses/d3-LICENSE
+# Collect third-party licenses straight out of the module cache. The module
+# versions and license file names are derived from the module graph instead of
+# being hardcoded, so bumping a dependency (or a dependency moving/renaming its
+# LICENSE) can no longer break the build. `go mod download` is repeated here on
+# purpose: this layer re-runs after `COPY . .`, and if the shared module cache
+# mount has been pruned in the meantime it is repopulated before anything is
+# read from it.
+RUN --mount=type=cache,target=/go/pkg/mod set -eu; \
+    go mod download; \
+    mkdir -p /out/licenses; \
+    cp LICENSE /out/licenses/TILLER-LICENSE; \
+    cp THIRD_PARTY_NOTICES.md /out/licenses/THIRD_PARTY_NOTICES.md; \
+    cp internal/web/assets/D3-LICENSE /out/licenses/d3-LICENSE; \
+    main_module=$(go list -m); \
+    go list -m -f '{{if .Dir}}{{.Path}}|{{.Dir}}{{end}}' all > /tmp/modules.txt; \
+    while IFS='|' read -r module dir; do \
+        if [ -z "$module" ] || [ "$module" = "$main_module" ]; then continue; fi; \
+        prefix=$(printf '%s' "$module" | tr '/' '-'); \
+        find "$dir" -maxdepth 2 -type f \( -name 'LICEN[CS]E*' -o -name 'COPYING*' \) > /tmp/licenses.txt; \
+        while IFS= read -r file; do \
+            name="$prefix-$(printf '%s' "${file#"$dir"/}" | tr '/' '-')"; \
+            name=${name%.md}; \
+            name=${name%.txt}; \
+            cp "$file" "/out/licenses/$name"; \
+        done < /tmp/licenses.txt; \
+    done < /tmp/modules.txt
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/tiller-router/tiller-router/internal/version.Version=${TILLER_VERSION} -X github.com/tiller-router/tiller-router/internal/version.Commit=${TILLER_COMMIT}" -o /out/tiller-router ./cmd/tiller-router
 RUN mkdir -p /out/data && chmod 0700 /out/data
 RUN mkdir -p /out/tmp && chmod 1777 /out/tmp
