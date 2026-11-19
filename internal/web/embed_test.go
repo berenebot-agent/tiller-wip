@@ -14,7 +14,7 @@ import (
 
 func TestHandlerServesSPAEntryWithoutRedirect(t *testing.T) {
 	t.Parallel()
-	tests := []string{"/", "/index.html", "/platform", "/login", "/verify-email?token=x", "/reset-password?token=x"}
+	tests := []string{"/", "/index.html", "/platform", "/platform/", "/login", "/verify-email?token=x", "/reset-password?token=x"}
 	handler := Handler()
 
 	for _, path := range tests {
@@ -358,7 +358,7 @@ func TestHandlerWithSiteSupportsRangeAndHead(t *testing.T) {
 	}
 }
 
-func TestHandlerServesStaticAssetsAndDoesNotRouteAPIOrHealthToSPA(t *testing.T) {
+func TestHandlerServesStaticAssetsAndKeepsUnknownReservedPathsOutOfSPA(t *testing.T) {
 	t.Parallel()
 	handler := Handler()
 
@@ -374,6 +374,7 @@ func TestHandlerServesStaticAssetsAndDoesNotRouteAPIOrHealthToSPA(t *testing.T) 
 		{name: "api child", path: "/api/missing", statusCode: http.StatusNotFound},
 		{name: "health", path: "/health", statusCode: http.StatusNotFound},
 		{name: "health child", path: "/health/missing", statusCode: http.StatusNotFound},
+		{name: "platform child", path: "/platform/missing", statusCode: http.StatusNotFound},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -392,7 +393,7 @@ func TestHandlerServesStaticAssetsAndDoesNotRouteAPIOrHealthToSPA(t *testing.T) 
 				t.Fatalf("Cache-Control = %q, want %q", res.Header().Get("Cache-Control"), test.cacheControl)
 			}
 			if strings.Contains(res.Body.String(), "<!doctype html>") {
-				t.Fatal("API or health response unexpectedly contains SPA HTML")
+				t.Fatal("response unexpectedly contains SPA HTML")
 			}
 		})
 	}

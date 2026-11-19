@@ -392,7 +392,8 @@ function hideBoot() { const boot = $('#boot-shell'); if (boot) boot.hidden = tru
 function showBootSkeleton() { const boot = $('#boot-shell'); if (boot) boot.hidden = false; }
 function setSessionHint(on) { try { if (on) localStorage.setItem(UI_SESSION_HINT, '1'); else localStorage.removeItem(UI_SESSION_HINT); } catch { /* storage unavailable */ } }
 function sessionHint() { try { return localStorage.getItem(UI_SESSION_HINT) === '1'; } catch { return false; } }
-function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); const setup = runtimeMode === 'local' && runtimeSetupRequired; authView(platform ? 'platform-login-form' : setup ? 'setup-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); refreshAuthOptions(); }
+function isPlatformRoute(path = location.pathname) { return path === '/platform' || path === '/platform/'; }
+function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && isPlatformRoute(); const setup = runtimeMode === 'local' && runtimeSetupRequired; authView(platform ? 'platform-login-form' : setup ? 'setup-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); refreshAuthOptions(); }
 // refreshAuthOptions re-reads what the login card greys in or out (passkey and
 // Google sign-in, signup, Turnstile) and repaints it. The flags it refreshes
 // come from /api/runtime and /api/auth/options, which used to be fetched once in
@@ -410,7 +411,7 @@ async function refreshAuthOptions() {
     if (runtimeMode === 'hosted') {
       // The platform console has its own sign-in form; /api/auth/options is a
       // customer-app route and 404s there.
-      if (location.pathname.startsWith('/platform')) return;
+      if (isPlatformRoute()) return;
       try { hostedAuthOptions = await api('/api/auth/options'); } catch { hostedAuthOptions = {}; }
     } else {
       let runtime;
@@ -957,7 +958,7 @@ $$('.platform-tab').forEach((button, index, buttons) => {
   });
 });
 window.addEventListener('popstate', () => {
-  if (location.pathname.startsWith('/platform') && !$('#platform-shell').hidden) selectPlatformTab(platformTabFromHash(), { push: false });
+  if (isPlatformRoute() && !$('#platform-shell').hidden) selectPlatformTab(platformTabFromHash(), { push: false });
 });
 $('#platform-stats-refresh').addEventListener('click', () => loadPlatformDashboard('overview').catch(error => setPlatformStatsUnavailable(errorMessage(error, 'Could not load platform statistics.'))));
 
@@ -986,7 +987,7 @@ $('#admin-name').addEventListener('click', () => {
   if (location.hash !== '#settings/account') history.pushState(null, '', '#settings/account');
   navigate('settings');
 });
-window.addEventListener('popstate', () => { if (!location.pathname.startsWith('/platform')) navigate(viewFromHash()); });
+window.addEventListener('popstate', () => { if (!isPlatformRoute()) navigate(viewFromHash()); });
 $$('[data-refresh-view]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.refreshView)));
 $$('[data-filter-toggle]').forEach(button => button.addEventListener('click', () => {
   const bar = button.closest('[data-filter-bar]');
@@ -4271,7 +4272,7 @@ async function setupAnalyticsConsent() {
   // The operator console has no consent banner and, when served on its own
   // origin/port, no customer analytics endpoint — probing it only produced a
   // 404 in the browser console.
-  if (location.pathname.startsWith('/platform')) return;
+  if (isPlatformRoute()) return;
   let options;
   try { options = await api('/api/analytics/options'); } catch { return; }
   if (!options || !options.enabled) return;
@@ -4297,7 +4298,7 @@ async function setupAnalyticsConsent() {
       // endpoint; /api/auth/options is a customer-app route and 404s here.
       // runtimeProbeDone is set below, after the probe resolves: showLogin()
       // must not re-probe on top of boot.
-      if (!location.pathname.startsWith('/platform')) {
+      if (!isPlatformRoute()) {
         try { hostedAuthOptions = await api('/api/auth/options'); } catch { hostedAuthOptions = {}; }
       } else {
         // The console's challenge settings come from its own probe; the session
@@ -4318,7 +4319,7 @@ async function setupAnalyticsConsent() {
     const path = location.pathname;
     const query = new URLSearchParams(location.search);
     const token = query.get('token');
-    if (runtimeMode === 'hosted' && path.startsWith('/platform')) {
+    if (runtimeMode === 'hosted' && isPlatformRoute(path)) {
       try {
         const session = await api('/api/platform/session');
         state.csrf = session.csrf_token;
