@@ -544,6 +544,7 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")
 		return
 	}
+	s.countHostedSignup(r.Context())
 	s.googlePending.Take(cookie.Value)
 	s.clearCookie(w, googleSignupCookie)
 	session, err := s.identity.CreateUserSession(r.Context(), u)

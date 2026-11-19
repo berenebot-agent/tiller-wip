@@ -494,6 +494,18 @@ async function mockPlatformLogin(page, { turnstile = true, submitStatus = 403, s
   return attempts;
 }
 
+test('platform lookalike paths fall back to the customer login', async ({ page }) => {
+  await mockPlatformLogin(page);
+  await page.route('**/api/auth/session', route => route.fulfill({ status: 401, json: { error: { code: 'unauthorized' } } }));
+
+  for (const path of ['/platform-admin', '/platformx']) {
+    await page.goto(path);
+    await expect(page.locator('#login-form')).toBeVisible();
+    await expect(page.locator('#platform-login-form')).toBeHidden();
+    await expect(page).toHaveURL(/\/login$/);
+  }
+});
+
 test('platform login mounts the security check from the console probe and sends its token', async ({ page }) => {
   const attempts = await mockPlatformLogin(page);
   await page.goto('/platform');
