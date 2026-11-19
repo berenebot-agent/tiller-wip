@@ -1485,3 +1485,32 @@ test('provider picker searches the full catalogue, configures defaults, and serv
   await page.request.delete(`/api/admin/providers/${named.id}`, { headers: { 'X-CSRF-Token': csrf } });
   await expect.poll(() => externalAssetRequests).toHaveLength(0);
 });
+
+test('search fields suppress browser autofill and the / hotkey still focuses them', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openAdmin(page);
+
+  // Chrome/Edge only offer their remembered-terms dropdown for type="search",
+  // which autocomplete="off" does not suppress. Every search box is a plain
+  // text input with role="searchbox" plus the password-manager opt-outs.
+  const searchIds = [
+    '#client-search', '#provider-search', '#model-search', '#virtual-search',
+    '#global-activity-search', '#platform-account-search'
+  ];
+  for (const id of searchIds) {
+    const input = page.locator(id);
+    await expect(input, id).toHaveAttribute('type', 'text');
+    await expect(input, id).toHaveAttribute('role', 'searchbox');
+    await expect(input, id).toHaveAttribute('autocomplete', 'off');
+    await expect(input, id).toHaveAttribute('data-1p-ignore', '');
+  }
+  await expect(page.locator('input[type="search"]')).toHaveCount(0);
+
+  // The / hotkey used to select on type="search"; it must still reach the
+  // current view's search box now that no input carries that type.
+  await page.locator('[data-view="virtual"]').first().click();
+  await expect(page.locator('#view-virtual')).toBeVisible();
+  await page.locator('body').click({ position: { x: 5, y: 5 } });
+  await page.keyboard.press('/');
+  await expect(page.locator('#virtual-search')).toBeFocused();
+});
