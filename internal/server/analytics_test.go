@@ -83,6 +83,58 @@ func TestPlatformAnalyticsSettingsValidationAndOptions(t *testing.T) {
 	}
 }
 
+func TestHostedAnalyticsTotals(t *testing.T) {
+	t.Parallel()
+	app, _, _ := hostedServerHarness(t, true)
+	papi := hostedPlatformAPI(t, app)
+	handler := app.Handler()
+	visit := func(method, path string) {
+		t.Helper()
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(method, path, nil))
+	}
+	setTotals := func(enabled bool) {
+		t.Helper()
+		status, payload, _ := papi.request(http.MethodPut, "/api/platform/settings", map[string]any{"analytics_totals_enabled": enabled})
+		if status != http.StatusNoContent {
+			t.Fatalf("set analytics totals to %t: %d %v", enabled, status, payload)
+		}
+	}
+	visit(http.MethodGet, "/") // Off by default.
+	setTotals(true)
+	visit(http.MethodGet, "/")
+	visit(http.MethodGet, "/login?ignored=1")
+	visit(http.MethodGet, "/legal/privacy")
+	visit(http.MethodGet, "/legal/terms")
+	visit(http.MethodHead, "/login")
+	visit(http.MethodGet, "/app.js")
+	visit(http.MethodGet, "/platform")
+	visit(http.MethodGet, "/api/runtime")
+	app.countHostedSignup(context.Background())
+	status, options, _ := papi.request(http.MethodGet, "/api/analytics/options", nil)
+	if status != http.StatusOK || len(options) != 1 || options["enabled"] != false {
+		t.Fatalf("server totals affected browser options: %d %v", status, options)
+	}
+	setTotals(false)
+	visit(http.MethodGet, "/login")
+	status, stats, _ := papi.request(http.MethodGet, "/api/platform/stats", nil)
+	analytics, _ := stats["hosted_analytics"].(map[string]any)
+	if status != http.StatusOK || analytics["enabled"] != false || analytics["available"] != true || stats["usage_available"] != false {
+		t.Fatalf("disabled analytics with retained totals: %d %v", status, stats)
+	}
+	days, _ := analytics["days"].([]any)
+	want := map[string]float64{"app_loads": 2, "privacy_loads": 1, "terms_loads": 1, "signups": 1}
+	for metric, expected := range want {
+		var total float64
+		for _, value := range days {
+			count, _ := value.(map[string]any)[metric].(float64)
+			total += count
+		}
+		if total != expected {
+			t.Errorf("%s = %g, want %g (days: %v)", metric, total, expected, days)
+		}
+	}
+}
+
 func TestPlatformPreventSearchIndexing(t *testing.T) {
 	t.Parallel()
 	app, _, _ := hostedServerHarness(t, false)

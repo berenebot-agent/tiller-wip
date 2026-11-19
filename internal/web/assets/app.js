@@ -4467,6 +4467,8 @@ function platformErrorElementID(tab) {
 async function loadPlatformDashboard(tab = state.platformTab) {
   if (tab === 'overview') {
     $('#platform-overview-error').textContent = '';
+    $('#hosted-analytics-status').textContent = 'Loading hosted traffic…';
+    $('#hosted-analytics-details').hidden = true;
     $('#platform-overview-metrics').innerHTML = [
       metric('…', 'Accounts'), metric('…', 'Active accounts'), metric('…', 'Pending accounts'),
       metric('…', 'Suspended accounts'), metric('…', 'Users'), metric('…', 'Requests · 24h'),
@@ -4489,6 +4491,7 @@ async function loadPlatformDashboard(tab = state.platformTab) {
       metric(stats.usage_available === false ? 'Unavailable' : formatMetricTotal(usage.tokens_7d), 'Tokens · 7d'),
     ].join('');
     $('#platform-overview-error').textContent = stats.usage_available === false ? 'Request and token totals are unavailable because the Activity store could not be read.' : '';
+    renderHostedAnalytics(stats.hosted_analytics);
     return;
   }
   if (tab === 'users') {
@@ -4533,7 +4536,20 @@ async function loadPlatformDashboard(tab = state.platformTab) {
   if (tab === 'settings') { await Promise.all([loadPlatformSettings(), loadPlatformAnalytics()]); return; }
 }
 
+function renderHostedAnalytics(analytics) {
+  const days = analytics?.days ?? [];
+  let message = 'Hosted traffic totals are unavailable.';
+  if (analytics?.available) {
+    if (analytics.enabled) message = days.length ? 'Page loads can include bots and repeat loads.' : 'Counting is enabled. No totals yet.';
+    else message = days.length ? 'Counting is off. Showing retained totals.' : 'Counting is off. Enable it in Settings.';
+  }
+  $('#hosted-analytics-status').textContent = message;
+  $('#hosted-analytics-details').hidden = !days.length;
+  $('#hosted-analytics-days').innerHTML = days.map(day => `<tr><th scope="row">${h(day.day)}</th><td>${formatCount(day.app_loads)}</td><td>${formatCount(day.privacy_loads)}</td><td>${formatCount(day.terms_loads)}</td><td>${formatCount(day.signups)}</td></tr>`).join('');
+}
+
 function setPlatformStatsUnavailable(message) {
+  renderHostedAnalytics();
   $('#platform-overview-metrics').innerHTML = [
     metric('—', 'Accounts'), metric('—', 'Active accounts'), metric('—', 'Pending accounts'),
     metric('—', 'Suspended accounts'), metric('—', 'Users'), metric('Unavailable', 'Requests · 24h'),
@@ -4573,12 +4589,12 @@ async function loadPlatformSettings() {
 async function loadPlatformAnalytics() {
   const settings = await api('/api/platform/settings');
   const form = $('#platform-analytics-form');
+  form.elements.analytics_totals_enabled.checked = !!settings.analytics?.totals_enabled;
   form.elements.analytics_enabled.checked = !!settings.analytics?.enabled;
   form.elements.analytics_provider.value = settings.analytics?.provider || 'umami';
   form.elements.analytics_script_url.value = settings.analytics?.script_url || '';
   form.elements.analytics_site_id.value = settings.analytics?.site_id || '';
   applyAnalyticsProviderVisibility(form.elements.analytics_provider.value);
-  $('#platform-analytics-status').textContent = settings.analytics?.enabled ? 'Analytics is enabled and consent-gated on hosted pages.' : 'Analytics is disabled.';
   $('#platform-analytics-error').textContent = '';
 }
 
@@ -4864,6 +4880,7 @@ $('#platform-analytics-form').addEventListener('submit', async event => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
   const payload = {
+    analytics_totals_enabled: form.get('analytics_totals_enabled') === 'on',
     analytics_enabled: form.get('analytics_enabled') === 'on',
     analytics_provider: form.get('analytics_provider'),
     analytics_script_url: form.get('analytics_script_url'),
