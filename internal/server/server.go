@@ -885,7 +885,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/chat/completions", s.requireClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.proxy(w, r, providers.ProtocolChat) }), false))
 	mux.Handle("POST /v1/responses", s.requireClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.proxy(w, r, providers.ProtocolResponses) }), false))
 	mux.Handle("POST /v1/messages", s.requireClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.proxy(w, r, providers.ProtocolMessages) }), true))
-	mux.Handle("/", s.assets)
+	if s.config.Mode == config.ModeHosted {
+		mux.HandleFunc("/", s.countHostedPage)
+	} else {
+		mux.Handle("/", s.assets)
+	}
 	var handler http.Handler = mux
 	if s.config.Mode == config.ModeHosted && s.config.PlatformPort != 0 {
 		// The console has its own listener; make sure the SPA route and any
