@@ -162,8 +162,11 @@ func (s *Scope) DeleteOAuthToken(ctx context.Context, providerID string) error {
 	return err
 }
 
-func (s *Scope) SetOAuthState(ctx context.Context, providerID, state string, at time.Time) error {
-	_, err := s.q.ExecContext(ctx, `UPDATE provider_oauth_tokens SET auth_state=?,updated_at=? WHERE provider_id=? AND account_id=?`, state, at.UTC().Format(time.RFC3339Nano), providerID, s.accountID)
+func (s *Scope) SetOAuthStateIfGeneration(ctx context.Context, providerID, state string, at time.Time, generation int64) error {
+	_, err := s.q.ExecContext(ctx, `UPDATE provider_oauth_tokens SET auth_state=?,updated_at=?
+		WHERE provider_id=? AND account_id=? AND generation=?
+		AND COALESCE((SELECT generation FROM oauth_connection_generations WHERE account_id=? AND provider_id=?),0)=?`,
+		state, at.UTC().Format(time.RFC3339Nano), providerID, s.accountID, generation, s.accountID, providerID, generation)
 	return err
 }
 

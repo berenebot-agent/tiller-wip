@@ -560,10 +560,6 @@ func TestPersistableRefreshErrorRespectsDisconnect(t *testing.T) {
 	}
 }
 
-// TestRefreshManagerAbandonsStuckCall pins the leak guard: a refresh whose
-// goroutine never publishes a result must not pin every later caller (and, via
-// the quota poller's credential hydration, the provider's in-flight state)
-// forever. Once the entry is older than callWaitTimeout it is replaced.
 func TestRefreshManagerAbandonsStuckCall(t *testing.T) {
 	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
@@ -582,33 +578,66 @@ func TestRefreshManagerAbandonsStuckCall(t *testing.T) {
 	if err := st.PutOAuthToken(context.Background(), TokenToStore(TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "refresh", TokenType: "Bearer", ExpiresAt: &expired, AuthState: AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()})); err != nil {
 		t.Fatal(err)
 	}
-	manager := NewManager(store.New(db.SQL), time.Minute)
-
-	// A call entry older than the wait timeout is presumed abandoned.
 	k := database.LocalAccountID + "\x00" + "provider-1"
-	stuck := &refreshCall{done: make(chan struct{}), started: time.Now().Add(-callWaitTimeout - time.Second)}
-	manager.mu.Lock()
-	manager.calls[k] = stuck
-	manager.mu.Unlock()
-
-	var calls atomic.Int32
-	record, err := manager.Current(context.Background(), database.LocalAccountID, "provider-1", func(context.Context, TokenRecord) (TokenResponse, error) {
-		calls.Add(1)
+	replacement := func(context.Context, TokenRecord) (TokenResponse, error) {
 		return TokenResponse{AccessToken: "new", RefreshToken: "rotated", ExpiresIn: 3600}, nil
+	}
+	t.Run("waiter timeout stays retryable", func(t *testing.T) {
+		manager := NewManager(store.New(db.SQL), time.Minute)
+		manager.calls[k] = &refreshCall{done: make(chan struct{}), started: time.Now().Add(time.Second - callWaitTimeout)}
+		_, err := manager.ForceRefresh(context.Background(), database.LocalAccountID, "provider-1", replacement)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("ForceRefresh returned %v, want deadline exceeded", err)
+		}
+		if state := testToken(t, st, "provider-1").AuthState; state != AuthConnected {
+			t.Fatalf("auth state after waiter timeout = %s, want connected", state)
+		}
 	})
-	if err != nil {
-		t.Fatalf("Current: %v", err)
-	}
-	if record.AccessToken != "new" {
-		t.Fatalf("access token = %q, want the refreshed one", record.AccessToken)
-	}
-	if calls.Load() != 1 {
-		t.Fatalf("refresh calls = %d, want 1", calls.Load())
-	}
-	manager.mu.Lock()
-	leftover := manager.calls[k]
-	manager.mu.Unlock()
-	if leftover != nil {
-		t.Fatal("a completed refresh should clear its call entry")
+
+	oldResponse := TokenResponse{AccessToken: "stale", RefreshToken: "stale-rotation", ExpiresIn: 3600}
+	for _, tc := range []struct {
+		name     string
+		response TokenResponse
+		err      error
+	}{
+		{name: "success", response: oldResponse},
+		{name: "partial rotation", err: &PersistableRefreshError{Token: oldResponse, Err: errors.New("network blip")}},
+		{name: "terminal failure", err: ErrReconnectRequired},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewManager(store.New(db.SQL), time.Minute)
+			started, release := make(chan struct{}), make(chan struct{})
+			finished := make(chan error, 1)
+			go func() {
+				_, err := manager.ForceRefresh(context.Background(), database.LocalAccountID, "provider-1", func(context.Context, TokenRecord) (TokenResponse, error) {
+					close(started)
+					<-release
+					return tc.response, tc.err
+				})
+				finished <- err
+			}()
+			defer func() {
+				close(release)
+				if err := <-finished; !errors.Is(err, errRefreshSuperseded) {
+					t.Errorf("superseded refresh returned %v", err)
+				}
+				stored := testToken(t, st, "provider-1")
+				if stored.AccessToken != "new" || stored.RefreshToken != "rotated" || stored.AuthState != AuthConnected {
+					t.Error("replacement credentials or auth state were overwritten")
+				}
+			}()
+			select {
+			case <-started:
+			case err := <-finished:
+				finished <- err
+				t.Fatalf("first refresh exited before entering the provider: %v", err)
+			}
+			manager.mu.Lock()
+			manager.calls[k].started = time.Now().Add(-callWaitTimeout)
+			manager.mu.Unlock()
+			if _, err := manager.ForceRefresh(context.Background(), database.LocalAccountID, "provider-1", replacement); err != nil {
+				t.Fatalf("replacement refresh failed: %v", err)
+			}
+		})
 	}
 }

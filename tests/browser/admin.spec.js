@@ -235,6 +235,58 @@ test('mobile: Single-key card route summary and Settings entry point', async ({ 
   await expect(page.locator('#form-dialog')).toBeHidden();
 });
 
+test('switch-activation waits for a completed mouse click and accepts keyboard activation', async ({ page }) => {
+  await openAdmin(page);
+  await page.getByRole('link', { name: 'Settings' }).click();
+  await page.getByRole('tab', { name: 'Logging' }).click();
+  const toggle = page.getByRole('checkbox', { name: 'Detailed error logging' });
+  await expect(toggle).not.toBeChecked();
+  const saves = [];
+  await page.route('**/api/admin/settings', async route => {
+    if (route.request().method() !== 'PUT') return route.continue();
+    saves.push(route.request().postDataJSON().log_error_bodies);
+    await route.fulfill({ status: 204 });
+  });
+  const bounds = await toggle.boundingBox();
+  const left = bounds.width / 4;
+  const right = 3 * left;
+  const middle = bounds.height / 2;
+  await page.mouse.move(bounds.x + right, bounds.y + middle);
+  await page.mouse.down();
+  await page.mouse.move(bounds.x - 30, bounds.y + middle);
+  await page.mouse.up();
+  await expect(toggle).not.toBeChecked();
+
+  await toggle.press('Space');
+  await expect(toggle).toBeChecked();
+  await expect.poll(() => saves).toEqual([true]);
+
+  await toggle.click({ position: { x: right, y: middle } });
+  await expect(toggle).toBeChecked();
+  await toggle.click({ position: { x: left, y: middle } });
+  await expect(toggle).not.toBeChecked();
+  await expect.poll(() => saves).toEqual([true, false]);
+});
+
+test.describe('switch-activation on a touch viewport', () => {
+  test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
+
+  test('either half toggles model permission', async ({ page }) => {
+    await seedProvider('touch-permission');
+    await seedClient('touch-permission-client');
+    await openAdmin(page);
+    const card = page.locator('.client-card', { hasText: 'touch-permission-client' });
+    await card.getByRole('button', { name: 'Manage permissions' }).tap();
+    const toggle = page.getByRole('checkbox', { name: 'Enable touch-permission/mock-model' });
+    await expect(toggle).not.toBeChecked();
+    const bounds = await toggle.boundingBox();
+    await toggle.tap({ position: { x: bounds.width / 4, y: bounds.height / 2 } });
+    await expect(toggle).toBeChecked();
+    await toggle.tap({ position: { x: bounds.width * 3 / 4, y: bounds.height / 2 } });
+    await expect(toggle).not.toBeChecked();
+  });
+});
+
 test('permission edits survive filtering, and cancel/save semantics hold', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openAdmin(page);
