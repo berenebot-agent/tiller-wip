@@ -134,6 +134,18 @@ func (m *Manager) refresh(ctx context.Context, accountID, providerID string, ref
 
 	record, err := m.get(ctx, accountID, providerID)
 	loaded := err == nil
+	// Freshness re-check under the flight. Current() reads the token and only
+	// then joins-or-starts a flight, so a caller descheduled in that window can
+	// arrive after the flight that refreshed the token has already completed and
+	// deleted itself. Without this check that caller starts a second, redundant
+	// refresh of credentials that are already fresh.
+	//
+	// Force refresh deliberately skips this: it is the explicit "refresh now"
+	// path (an operator clicking refresh, or a reconnect probe) and must always
+	// reach the provider, however fresh the stored token looks.
+	if !force && loaded && record.RefreshToken != "" && !RefreshNeeded(record, time.Now(), m.lead) {
+		return m.finish(key, call, record, nil)
+	}
 	generation := record.Generation
 	var rotated *TokenRecord
 	if err == nil {
@@ -183,6 +195,20 @@ func (m *Manager) refresh(ctx context.Context, accountID, providerID string, ref
 	}
 	call.record, call.err = record, err
 	close(call.done)
+	return record, err
+}
+
+// finish publishes an already-known result for call and releases its flight.
+// It is the path taken when the freshness re-check proves the refresh is no
+// longer needed at all, so there is nothing to write.
+func (m *Manager) finish(key string, call *refreshCall, record TokenRecord, err error) (TokenRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	call.record, call.err = record, err
+	close(call.done)
+	if m.calls[key] == call {
+		delete(m.calls, key)
+	}
 	return record, err
 }
 
