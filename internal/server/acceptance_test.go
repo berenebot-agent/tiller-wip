@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/config"
-	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 )
 
 type testAPI struct {
@@ -145,7 +145,7 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +403,7 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 	if err := os.WriteFile(restorePath, backupBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	restoredDB, err := database.Open(context.Background(), restorePath)
+	restoredDB, err := dbtest.Open(context.Background(), restorePath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -499,7 +499,7 @@ func TestCatalogueSurfacesCapabilities(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

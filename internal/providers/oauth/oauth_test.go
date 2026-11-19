@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
@@ -226,7 +227,7 @@ func TestPollDeviceCode(t *testing.T) {
 
 func TestForceRefreshTransitionsAuthStateOnFailure(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +313,7 @@ func TestForceRefreshTransitionsAuthStateOnFailure(t *testing.T) {
 // (which would also change the token-refresh path), so it is left for a
 // deliberate change rather than folded into the test-speed work.
 func TestRefreshManagerDeduplicatesConcurrentRefresh(t *testing.T) {
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +372,7 @@ func TestRefreshManagerDeduplicatesConcurrentRefresh(t *testing.T) {
 // must stay retryable.
 func TestForceRefreshTransientOnContextCancellation(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +410,7 @@ func TestForceRefreshTransientOnContextCancellation(t *testing.T) {
 
 func TestOAuthWritersRemainDisconnectedAcrossRaces(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,7 +476,7 @@ func TestOAuthWritersRemainDisconnectedAcrossRaces(t *testing.T) {
 // invalidated.
 func TestPersistableRefreshErrorStoresRotatedCredentials(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -520,7 +521,7 @@ func TestPersistableRefreshErrorStoresRotatedCredentials(t *testing.T) {
 // refresh was in flight.
 func TestPersistableRefreshErrorRespectsDisconnect(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -556,5 +557,87 @@ func TestPersistableRefreshErrorRespectsDisconnect(t *testing.T) {
 	}
 	if _, err := st.GetOAuthToken(context.Background(), "provider-1"); !errors.Is(err, store.ErrNoOAuthToken) {
 		t.Fatalf("disconnected provider row was recreated: err=%v", err)
+	}
+}
+
+func TestRefreshManagerAbandonsStuckCall(t *testing.T) {
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := database.Now()
+	if _, err := db.SQL.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES('oauth-provider','real','provider-1')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,enabled,protocols,created_at,updated_at) VALUES('provider-1','oauth-provider','codex-subscription','https://provider.invalid',1,'["responses"]',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	st := newTestStore(t, db)
+	expired := time.Now().Add(-time.Minute)
+	if err := st.PutOAuthToken(context.Background(), TokenToStore(TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "refresh", TokenType: "Bearer", ExpiresAt: &expired, AuthState: AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()})); err != nil {
+		t.Fatal(err)
+	}
+	k := database.LocalAccountID + "\x00" + "provider-1"
+	replacement := func(context.Context, TokenRecord) (TokenResponse, error) {
+		return TokenResponse{AccessToken: "new", RefreshToken: "rotated", ExpiresIn: 3600}, nil
+	}
+	t.Run("waiter timeout stays retryable", func(t *testing.T) {
+		manager := NewManager(store.New(db.SQL), time.Minute)
+		manager.calls[k] = &refreshCall{done: make(chan struct{}), started: time.Now().Add(time.Second - callWaitTimeout)}
+		_, err := manager.ForceRefresh(context.Background(), database.LocalAccountID, "provider-1", replacement)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("ForceRefresh returned %v, want deadline exceeded", err)
+		}
+		if state := testToken(t, st, "provider-1").AuthState; state != AuthConnected {
+			t.Fatalf("auth state after waiter timeout = %s, want connected", state)
+		}
+	})
+
+	oldResponse := TokenResponse{AccessToken: "stale", RefreshToken: "stale-rotation", ExpiresIn: 3600}
+	for _, tc := range []struct {
+		name     string
+		response TokenResponse
+		err      error
+	}{
+		{name: "success", response: oldResponse},
+		{name: "partial rotation", err: &PersistableRefreshError{Token: oldResponse, Err: errors.New("network blip")}},
+		{name: "terminal failure", err: ErrReconnectRequired},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := NewManager(store.New(db.SQL), time.Minute)
+			started, release := make(chan struct{}), make(chan struct{})
+			finished := make(chan error, 1)
+			go func() {
+				_, err := manager.ForceRefresh(context.Background(), database.LocalAccountID, "provider-1", func(context.Context, TokenRecord) (TokenResponse, error) {
+					close(started)
+					<-release
+					return tc.response, tc.err
+				})
+				finished <- err
+			}()
+			defer func() {
+				close(release)
+				if err := <-finished; !errors.Is(err, errRefreshSuperseded) {
+					t.Errorf("superseded refresh returned %v", err)
+				}
+				stored := testToken(t, st, "provider-1")
+				if stored.AccessToken != "new" || stored.RefreshToken != "rotated" || stored.AuthState != AuthConnected {
+					t.Error("replacement credentials or auth state were overwritten")
+				}
+			}()
+			select {
+			case <-started:
+			case err := <-finished:
+				finished <- err
+				t.Fatalf("first refresh exited before entering the provider: %v", err)
+			}
+			manager.mu.Lock()
+			manager.calls[k].started = time.Now().Add(-callWaitTimeout)
+			manager.mu.Unlock()
+			if _, err := manager.ForceRefresh(context.Background(), database.LocalAccountID, "provider-1", replacement); err != nil {
+				t.Fatalf("replacement refresh failed: %v", err)
+			}
+		})
 	}
 }

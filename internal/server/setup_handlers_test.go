@@ -15,6 +15,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 	"github.com/tiller-router/tiller-router/internal/testutil/fastsecret"
 )
 
@@ -22,7 +23,7 @@ import (
 // a fresh `docker compose up`, and returns a cookie-jar API client.
 func firstRunHarness(t *testing.T) (*Server, *testAPI) {
 	t.Helper()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +184,7 @@ func TestSetupRateLimited(t *testing.T) {
 // hide the onboarding wizard.
 func TestSetupAbsentWithEnvAdmin(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +215,7 @@ func TestLoginUsesStoredCredentialAfterRestart(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "router.db")
-	db, err := database.Open(context.Background(), dbPath)
+	db, err := dbtest.Open(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +233,7 @@ func TestLoginUsesStoredCredentialAfterRestart(t *testing.T) {
 	router.Close()
 	db.Close()
 
-	reopened, err := database.Open(context.Background(), dbPath)
+	reopened, err := dbtest.Open(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +295,7 @@ func TestLocalOnboardingRoutes(t *testing.T) {
 // setup fields are a local-mode addition only.
 func TestHostedRuntimePayloadUnchanged(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

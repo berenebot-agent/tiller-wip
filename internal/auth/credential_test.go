@@ -9,13 +9,14 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/auth"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 	"github.com/tiller-router/tiller-router/internal/testutil/fastsecret"
 )
 
 // newCredentialDB opens a migrated database for credential tests.
 func newCredentialDB(t *testing.T) *database.DB {
 	t.Helper()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +153,7 @@ func TestSetCredentialInvalidatesSessions(t *testing.T) {
 func TestWizardCredentialSurvivesRestart(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	db, err := database.Open(context.Background(), filepath.Join(dir, "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(dir, "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +163,7 @@ func TestWizardCredentialSurvivesRestart(t *testing.T) {
 	}
 	db.Close()
 
-	reopened, err := database.Open(context.Background(), filepath.Join(dir, "router.db"))
+	reopened, err := dbtest.Open(context.Background(), filepath.Join(dir, "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

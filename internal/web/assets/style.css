@@ -269,27 +269,41 @@ dialog{width:min(580px,calc(100vw - 32px));border:0;border-radius:var(--r-xl);pa
   .virtual-settings-dialog .routing-targets[data-fallback-targets]{display:none}
   .virtual-settings-dialog [data-fallback-hint],.virtual-settings-dialog [data-target-add]{display:none!important}
   .virtual-settings-dialog [name="routing_mode"]{max-width:100%}
-  .permissions-dialog .switch,.permissions-dialog input.switch{appearance:none;position:relative;width:42px;height:24px;padding:0;border:1px solid #9aaab6;border-radius:999px;background:#d5dde3;box-shadow:inset 0 1px 2px rgba(23,52,84,.12)}
-  .permissions-dialog .switch:after,.permissions-dialog input.switch:after{content:"";position:absolute;width:18px;height:18px;left:2px;top:2px;border-radius:50%;background:white;box-shadow:0 1px 3px rgba(23,52,84,.28);transition:transform .15s}
+  /* The base pill is only 24px high; on a phone-sized sheet the
+     switch grows to 44x26, matching the other mobile surfaces. */
+  .permissions-dialog .switch,.permissions-dialog input.switch{appearance:none;position:relative;width:44px;height:26px;padding:0;border:1px solid #9aaab6;border-radius:999px;background:#d5dde3;box-shadow:inset 0 1px 2px rgba(23,52,84,.12)}
+  .permissions-dialog .switch:after,.permissions-dialog input.switch:after{content:"";position:absolute;width:20px;height:20px;left:2px;top:2px;border-radius:50%;background:white;box-shadow:0 1px 3px rgba(23,52,84,.28);transition:transform .15s}
   .permissions-dialog .switch:checked,.permissions-dialog input.switch:checked{background:var(--blue);border-color:var(--blue-dark)}
   .permissions-dialog .switch:checked:after,.permissions-dialog input.switch:checked:after{transform:translateX(18px)}
-  .permissions-dialog #catalogue-config{min-height:0}
+  .permissions-dialog #catalogue-config{min-height:0;display:flex;flex-direction:column}
   .permissions-dialog .permission-toolbar{position:sticky;top:0;z-index:4;display:grid;gap:10px;padding:12px 14px;background:var(--sunken)}
   .permissions-dialog .permission-toolbar .permission-search{display:grid;gap:6px;width:100%;align-items:stretch}
   .permissions-dialog .permission-toolbar .permission-search input{width:100%}
   .permissions-dialog .permission-bulk{display:grid;grid-template-columns:1fr 1fr;width:100%;gap:7px}
   .permissions-dialog .permission-bulk .btn{min-height:38px}
-  .permissions-dialog .permission-groups{padding:0 14px 16px}
+  /* The bottom sheet is a fixed 92vh; the toolbar and footer stay put and the
+     model list is the only scrolling region, so a row's switch can never end
+     up under the footer edge. */
+  .permissions-dialog>section{min-height:0}
+  .permissions-dialog .permission-toolbar{flex:none}
+  .permissions-dialog .permission-groups{flex:1;min-height:0;overflow:auto;padding:0 14px 16px}
+  .permissions-dialog footer{position:sticky;bottom:0;z-index:5;flex:none}
   .permissions-dialog .permission-section{margin-bottom:12px}
   .permissions-dialog .permission-section-head{padding:12px 10px}
   .permissions-dialog .permission-group{border-radius:6px;overflow:hidden}
   .permissions-dialog .permission-group-head{padding:11px 10px;gap:10px}
   .permissions-dialog .permission-group-actions{width:100%;display:grid;grid-template-columns:1fr;gap:8px}
   .permissions-dialog .permission-group-actions .permission-bulk{display:grid;grid-template-columns:1fr 1fr}
-  .permissions-dialog .permission-list{display:block}
-  .permissions-dialog .permission-row{min-height:50px;padding:10px}
+  /* The rows are <label>s. `display:block` dropped them out of the item
+     layout, so a long model ID stretched past the pane and pushed the switch
+     away from the tap point; a single-column grid keeps every row inside the
+     list and the switch on the row's trailing edge. */
+  .permissions-dialog .permission-list{display:grid;grid-template-columns:minmax(0,1fr)}
+  .permissions-dialog .permission-row{display:flex;min-width:0;min-height:52px;padding:10px 12px;gap:12px}
   .permissions-dialog .permission-row:nth-child(odd){border-right:0}
   .permissions-dialog .permission-row code{min-width:0;overflow-wrap:anywhere;padding-right:8px}
+  .permissions-dialog .permission-row .switch,
+  .permissions-dialog .permission-row input.switch{flex:none}
 }
 
 /* Mobile client-key cards: hidden on desktop, shown below the mobile breakpoint. */

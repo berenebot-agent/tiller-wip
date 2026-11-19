@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/tiller-router/tiller-router/internal/config"
-	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 )
 
 func TestTemperatureRouting(t *testing.T) {
@@ -45,7 +45,7 @@ func TestTemperatureRouting(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dataDir, "models-dev.json"), []byte(`{"anthropic":{"models":{"no-sampling":{"temperature":false},"sampling":{"temperature":true},"unknown":{}}}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	db, err := database.Open(context.Background(), filepath.Join(dataDir, "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(dataDir, "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

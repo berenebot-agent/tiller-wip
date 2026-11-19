@@ -12,6 +12,7 @@ import (
 var (
 	ErrReconnectRequired = errors.New("oauth reconnection required")
 	ErrAuthUnavailable   = errors.New("oauth provider unavailable")
+	errRefreshSuperseded = errors.New("oauth refresh superseded")
 )
 
 // PersistableRefreshError reports a refresh that rotated durable credentials and
@@ -35,10 +36,23 @@ func (e *PersistableRefreshError) Unwrap() error { return e.Err }
 type RefreshFunc func(context.Context, TokenRecord) (TokenResponse, error)
 
 type refreshCall struct {
-	done   chan struct{}
-	record TokenRecord
-	err    error
+	done          chan struct{}
+	record        TokenRecord
+	err           error
+	forced        bool
+	forcedWaiters int
+	// started bounds how long other callers will wait on this call. A refresh
+	// whose goroutine never finishes must not pin every later waiter: after
+	// this deadline the entry is treated as abandoned and a fresh refresh is
+	// started by the next caller.
+	started time.Time
 }
+
+// callWaitTimeout bounds how long a second caller waits on another caller's
+// in-flight token refresh before giving up on it. The refresh itself runs
+// under its caller's context, so this is deliberately several times longer
+// than a normal token round-trip: it is a leak guard, not a latency budget.
+var callWaitTimeout = 2 * time.Minute
 
 type Manager struct {
 	store *store.Store
@@ -71,53 +85,58 @@ func (m *Manager) Current(ctx context.Context, accountID, providerID string, ref
 	if record.RefreshToken == "" {
 		return TokenRecord{}, ErrReconnectRequired
 	}
-	return m.refresh(ctx, accountID, providerID, refresh)
+	return m.refresh(ctx, accountID, providerID, refresh, false)
 }
 
 func (m *Manager) ForceRefresh(ctx context.Context, accountID, providerID string, refresh RefreshFunc) (TokenRecord, error) {
-	record, err := m.refresh(ctx, accountID, providerID, refresh)
-	if err == nil {
-		return record, nil
-	}
-	// Only transition to a dead state on a definitive signal. Transient
-	// failures (network blips, timeouts, context cancellation) must remain
-	// retryable — they never permanently mark the provider unavailable.
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return record, err
-	}
-	now := time.Now()
-	switch {
-	case errors.Is(err, ErrReconnectRequired):
-		_ = m.store.For(accountID).SetOAuthState(ctx, providerID, string(AuthReconnectRequired), now)
-	case errors.Is(err, ErrAuthUnavailable):
-		_ = m.store.For(accountID).SetOAuthState(ctx, providerID, string(AuthUnavailable), now)
-	}
-	return record, err
+	return m.refresh(ctx, accountID, providerID, refresh, true)
 }
 
-func (m *Manager) refresh(ctx context.Context, accountID, providerID string, refresh RefreshFunc) (TokenRecord, error) {
+func (m *Manager) refresh(ctx context.Context, accountID, providerID string, refresh RefreshFunc, force bool) (TokenRecord, error) {
 	if refresh == nil {
 		return TokenRecord{}, errors.New("oauth refresh function is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return TokenRecord{}, err
 	}
 	key := accountID + "\x00" + providerID
 	m.mu.Lock()
 	if call := m.calls[key]; call != nil {
-		m.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			return TokenRecord{}, ctx.Err()
-		case <-call.done:
-			return call.record, call.err
+		// An entry older than the wait timeout is presumed abandoned: its
+		// goroutine never published a result, so waiting on it (or refusing to
+		// start a fresh refresh because of it) would wedge every caller — and
+		// with it the quota poller's in-flight state. Replace it instead.
+		if wait := callWaitTimeout - time.Since(call.started); wait > 0 {
+			if force {
+				call.forcedWaiters++
+			}
+			m.mu.Unlock()
+			var err error
+			select {
+			case <-ctx.Done():
+				err = ctx.Err()
+			case <-call.done:
+				return call.record, call.err
+			case <-time.After(wait):
+				err = context.DeadlineExceeded
+			}
+			if force {
+				m.mu.Lock()
+				call.forcedWaiters--
+				m.mu.Unlock()
+			}
+			return TokenRecord{}, err
 		}
 	}
-	call := &refreshCall{done: make(chan struct{})}
+	call := &refreshCall{done: make(chan struct{}), forced: force, started: time.Now()}
 	m.calls[key] = call
 	m.mu.Unlock()
 
 	record, err := m.get(ctx, accountID, providerID)
-	var generation int64
+	loaded := err == nil
+	generation := record.Generation
+	var rotated *TokenRecord
 	if err == nil {
-		generation = record.Generation
 		response, refreshErr := refresh(ctx, record)
 		if refreshErr != nil {
 			err = refreshErr
@@ -129,30 +148,41 @@ func (m *Manager) refresh(ctx context.Context, accountID, providerID string, ref
 			var persistable *PersistableRefreshError
 			if errors.As(refreshErr, &persistable) {
 				if merged, mergeErr := MergeToken(record, persistable.Token, time.Now()); mergeErr == nil {
-					merged.Generation = generation
-					if putErr := m.store.For(accountID).PutOAuthTokenIfGeneration(ctx, TokenToStore(merged), generation); putErr != nil {
-						// Best effort: the refresh is already failing. A
-						// generation change here means the connection was
-						// deliberately disconnected or replaced, which must not
-						// be undone by this write.
-						_ = putErr
-					}
+					rotated = &merged
 				}
 			}
 		} else {
 			record, err = MergeToken(record, response, time.Now())
-			if err == nil {
-				record.Generation = generation
-				err = m.store.For(accountID).PutOAuthTokenIfGeneration(ctx, TokenToStore(record), generation)
-			}
 		}
 	}
 
+	// Keep ownership through the local write so replacement cannot race it.
+	// The upstream refresh runs outside the lock.
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.calls[key] == call {
+		scope := m.store.For(accountID)
+		if err == nil {
+			record.Generation = generation
+			err = scope.PutOAuthTokenIfGeneration(ctx, TokenToStore(record), generation)
+		} else if rotated != nil {
+			// Best effort, since the refresh is already failing.
+			_ = scope.PutOAuthTokenIfGeneration(ctx, TokenToStore(*rotated), generation)
+		}
+		if loaded && (call.forced || call.forcedWaiters > 0) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			switch {
+			case errors.Is(err, ErrReconnectRequired):
+				_ = scope.SetOAuthStateIfGeneration(ctx, providerID, string(AuthReconnectRequired), time.Now(), generation)
+			case errors.Is(err, ErrAuthUnavailable):
+				_ = scope.SetOAuthStateIfGeneration(ctx, providerID, string(AuthUnavailable), time.Now(), generation)
+			}
+		}
+		delete(m.calls, key)
+	} else {
+		record, err = TokenRecord{}, errRefreshSuperseded
+	}
 	call.record, call.err = record, err
-	delete(m.calls, key)
 	close(call.done)
-	m.mu.Unlock()
 	return record, err
 }
 

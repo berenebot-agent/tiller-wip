@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/crypto"
-	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 	"github.com/tiller-router/tiller-router/internal/mailer"
 )
 
@@ -39,7 +39,7 @@ func testCipher(t *testing.T) *crypto.Cipher {
 
 func newTestOutbox(t *testing.T) (*Outbox, *sql.DB) {
 	t.Helper()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
