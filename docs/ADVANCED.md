@@ -191,10 +191,27 @@ The browser receives neither secret. If you rotate a secret, enter the new
 value and save; leave it blank to keep the stored value. Use the explicit
 “Clear saved … secret” checkbox to remove one.
 
-## Analytics isolation
+## Hosted analytics
 
-Optional web analytics are configured from the platform console and are loaded
-only after a visitor accepts the consent banner. The vendor script never runs in
+Platform Settings has separate switches for server totals and optional browser
+analytics. Both are off by default. Server totals cover all visitors when
+enabled, regardless of their browser analytics choice. Review the applicable
+privacy and consent requirements and update the published Privacy Policy before
+enabling either option. Describe the data collected, its purpose, retention,
+and any analytics vendor that receives data.
+
+The server counts successful HTML GETs for `/` and `/login` together and for
+`/legal/privacy` and `/legal/terms` individually. It also counts successful
+self-service account creations by email or Google. Email accounts are counted
+when created, while verification is still pending. Platform Overview shows daily
+UTC counts retained in the live database for 90 calendar days, including today.
+The counters store only the date, metric, and count. Page loads can include bots
+and repeat loads. Collection is best effort if the database is busy. The totals
+include the home page when it is served from the optional custom site. This
+feature runs only in hosted mode.
+
+Optional browser analytics on the hosted app loads only after a visitor accepts
+the consent banner. The vendor script runs outside
 the console document: it is mounted in `/analytics-frame.html`, embedded as a
 sandboxed iframe with `allow-scripts` only. Without `allow-same-origin` the frame
 has an opaque origin, so the script cannot read the console's DOM or cookies and

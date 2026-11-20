@@ -160,8 +160,11 @@ func HandlerWithSite(siteDir string, logger *slog.Logger) (http.Handler, error) 
 		// The admin UI is embedded into the binary and changes whenever the
 		// router is rebuilt. Prevent browsers from retaining an older bundle,
 		// which can otherwise make the editor appear out of sync with the API.
-		isEntry := r.URL.Path == "/" || r.URL.Path == "/index.html" ||
-			(!isReservedPath(r.URL.Path, "/api") && !isReservedPath(r.URL.Path, "/health") && !strings.Contains(r.URL.Path, "."))
+		requestPath := r.URL.Path
+		isEntry := requestPath == "/" || requestPath == "/index.html" ||
+			requestPath == "/platform" || requestPath == "/platform/" ||
+			(!isReservedPath(requestPath, "/api") && !isReservedPath(requestPath, "/health") &&
+				!isReservedPath(requestPath, "/platform") && !strings.Contains(requestPath, "."))
 		if isEntry || strings.HasSuffix(r.URL.Path, ".js") || strings.HasSuffix(r.URL.Path, ".css") {
 			w.Header().Set("Cache-Control", "no-store")
 		}
