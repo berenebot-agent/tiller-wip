@@ -98,7 +98,7 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	// Hosted mode honours the provider-terms decision recorded on the
 	// descriptor. The admin UI hides these types; this is the authoritative
-	// backstop for a direct API call (docs/provider_terms_review.md).
+	// backstop for a direct API call.
 	if s.config.Mode == config.ModeHosted && descriptor.HostedDisabled {
 		adminError(w, 400, "provider_type_disabled", "This provider type is not available in hosted mode.")
 		return

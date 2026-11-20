@@ -54,8 +54,8 @@ type Descriptor struct {
 	Discovery     string `json:"-"`
 	// HostedDisabled marks a provider type that hosted Tiller's admin UI must
 	// not offer when adding a provider. It is a presentation-level policy flag
-	// only; see docs/provider_terms_review.md. Existing providers of this type
-	// are unaffected, and the create endpoint does not yet enforce it.
+	// only. Existing providers of this type are unaffected; the create endpoint
+	// enforces this flag in hosted mode.
 	HostedDisabled bool `json:"hosted_disabled,omitempty"`
 }
 
