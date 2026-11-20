@@ -24,7 +24,9 @@ import json
 import statistics
 import threading
 import time
+import urllib.error
 import urllib.request
+from collections import Counter
 
 RESULTS = []
 RESULTS_LOCK = threading.Lock()
@@ -55,6 +57,14 @@ def one_request(base_url, api_key, model, stream, timeout, body_bytes):
             # non-streaming responses.
             while response.read(65536):
                 pass
+    except urllib.error.HTTPError as exc:
+        # Keep the router's status and error code: a 429 (cap doing its job)
+        # and a 5xx (gate failure) mean very different things.
+        status = exc.code
+        try:
+            error = json.loads(exc.read(4096)).get("error", {}).get("code", "") or "HTTPError"
+        except Exception:  # noqa: BLE001 - a non-JSON error body is still data
+            error = "HTTPError"
     except Exception as exc:  # noqa: BLE001 - a probe failure is data, not a crash
         error = type(exc).__name__
     elapsed = time.monotonic() - started
@@ -112,6 +122,8 @@ def main():
         print(f"latency p50 {pct(latencies, 50) * 1000:.1f}ms p95 {pct(latencies, 95) * 1000:.1f}ms p99 {pct(latencies, 99) * 1000:.1f}ms max {max(latencies) * 1000:.1f}ms")
         print(f"mean {statistics.fmean(latencies) * 1000:.1f}ms")
     if failures:
+        breakdown = Counter((status, error) for status, _, error in failures)
+        print("failure breakdown: " + ", ".join(f"{status} {error} x{count}" for (status, error), count in breakdown.most_common()))
         for status, elapsed, error in failures[:10]:
             print(f"  failure: status={status} error={error} ({elapsed * 1000:.1f}ms)")
     # Non-zero exit when any request failed so the harness can gate CI.
