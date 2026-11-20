@@ -27,6 +27,7 @@ const (
 	PlatformSettingTurnstileSiteKey      = "turnstile_site_key"
 	PlatformSettingTurnstileSecret       = "turnstile_secret"
 	PlatformSettingAnalyticsEnabled      = "analytics_enabled"
+	PlatformSettingAnalyticsTotals       = "analytics_totals_enabled"
 	PlatformSettingAnalyticsProvider     = "analytics_provider"
 	PlatformSettingAnalyticsScriptURL    = "analytics_script_url"
 	PlatformSettingAnalyticsSiteID       = "analytics_site_id"
@@ -118,14 +119,13 @@ type PlatformSettingsProposal struct {
 	Analytics             PlatformAnalyticsSettings
 }
 
-// PlatformAnalyticsSettings is the operator-configured, consent-gated web
-// analytics integration for hosted mode. Values are public (they are served to
-// every hosted page), so they are stored in plaintext and require no cipher.
+// PlatformAnalyticsSettings configures hosted server totals and optional browser analytics.
 type PlatformAnalyticsSettings struct {
-	Enabled   bool
-	Provider  string
-	ScriptURL string
-	SiteID    string
+	Enabled       bool
+	TotalsEnabled bool
+	Provider      string
+	ScriptURL     string
+	SiteID        string
 }
 
 // PlatformAuthSettings contains hosted-only login integration settings.
@@ -181,6 +181,7 @@ func (s *Store) SavePlatformSettings(ctx context.Context, proposal PlatformSetti
 		PlatformSettingTurnstileSiteKey:   proposal.Auth.TurnstileSiteKey,
 		PlatformSettingTurnstileSecret:    proposal.Auth.TurnstileSecret,
 		PlatformSettingAnalyticsEnabled:   boolString(proposal.Analytics.Enabled),
+		PlatformSettingAnalyticsTotals:    boolString(proposal.Analytics.TotalsEnabled),
 		PlatformSettingAnalyticsProvider:  proposal.Analytics.Provider,
 		PlatformSettingAnalyticsScriptURL: proposal.Analytics.ScriptURL,
 		PlatformSettingAnalyticsSiteID:    proposal.Analytics.SiteID,
@@ -269,7 +270,7 @@ func (s *Store) GetPlatformAuthSettings(ctx context.Context) (PlatformAuthSettin
 // secrets and are safe to serve to the browser.
 func (s *Store) GetPlatformAnalyticsSettings(ctx context.Context) (PlatformAnalyticsSettings, error) {
 	keys := []string{
-		PlatformSettingAnalyticsEnabled, PlatformSettingAnalyticsProvider,
+		PlatformSettingAnalyticsEnabled, PlatformSettingAnalyticsTotals, PlatformSettingAnalyticsProvider,
 		PlatformSettingAnalyticsScriptURL, PlatformSettingAnalyticsSiteID,
 	}
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(keys)), ",")
@@ -294,11 +295,13 @@ func (s *Store) GetPlatformAnalyticsSettings(ctx context.Context) (PlatformAnaly
 		return PlatformAnalyticsSettings{}, err
 	}
 	enabled := values[PlatformSettingAnalyticsEnabled]
+	totalsEnabled := values[PlatformSettingAnalyticsTotals]
 	return PlatformAnalyticsSettings{
-		Enabled:   enabled == "1" || strings.EqualFold(enabled, "true"),
-		Provider:  values[PlatformSettingAnalyticsProvider],
-		ScriptURL: values[PlatformSettingAnalyticsScriptURL],
-		SiteID:    values[PlatformSettingAnalyticsSiteID],
+		Enabled:       enabled == "1" || strings.EqualFold(enabled, "true"),
+		TotalsEnabled: totalsEnabled == "1" || strings.EqualFold(totalsEnabled, "true"),
+		Provider:      values[PlatformSettingAnalyticsProvider],
+		ScriptURL:     values[PlatformSettingAnalyticsScriptURL],
+		SiteID:        values[PlatformSettingAnalyticsSiteID],
 	}, nil
 }
 

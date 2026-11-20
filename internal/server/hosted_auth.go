@@ -241,6 +241,7 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 	}
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "user.signup", ActorType: "anonymous", TargetType: "user", TargetID: result.User.ID})
 	writeJSON(w, http.StatusAccepted, map[string]any{"message": genericSignupMessage})
+	s.countHostedSignup(r.Context())
 }
 
 func (s *Server) userLogin(w http.ResponseWriter, r *http.Request) {
