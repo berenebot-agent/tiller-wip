@@ -8,7 +8,7 @@ const SCRIPT_URL = 'https://analytics.example.com/script.js';
 const SITE_ID = 'site-1';
 
 // analyticsFrame is the sandboxed iframe the console mounts once consent is
-// given. Since 4e0038a the vendor script is loaded inside that frame rather
+// given. Since d1ffd20 the vendor script is loaded inside that frame rather
 // than into the application document, so the frame — not a <script> in the
 // page — is the observable that proves analytics loaded.
 const analyticsFrame = page => page.locator('iframe[data-tiller-analytics]');

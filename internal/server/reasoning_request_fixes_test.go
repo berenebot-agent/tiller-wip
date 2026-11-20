@@ -63,7 +63,7 @@ func TestReasoningRequestFixes_EnabledWithoutBudgetMetadataUsesDefault(t *testin
 	t.Parallel()
 	caps := &providers.ReasoningCapabilities{ThinkingModes: []string{"enabled"}}
 	result := applyReasoningSelector([]byte(`{"model":"x"}`), reasoningSelector{Present: true, Effort: "high"}, providers.ProtocolMessages, caps)
-	// Unadvertised efforts are never emitted (e5deab9): the target gets a
+	// Unadvertised efforts are never emitted (8002965): the target gets a
 	// valid enabled default, but the "high" effort is dropped because the
 	// catalogue did not advertise effort support.
 	if !strings.Contains(string(result), `"type":"enabled"`) || !strings.Contains(string(result), `"budget_tokens":1024`) {
@@ -112,7 +112,7 @@ func TestReasoningRequestFixes_TranslatedEffortRetainedWithEnabledMessages(t *te
 	caps := &providers.ReasoningCapabilities{ThinkingModes: []string{"enabled"}}
 	result := applyReasoningSelector(translated, extractReasoningSelector(request, providers.ProtocolChat), providers.ProtocolMessages, caps)
 	// The translated "high" effort is dropped when the Messages target does
-	// not advertise effort support (e5deab9); enabled thinking is retained.
+	// not advertise effort support (8002965); enabled thinking is retained.
 	if !strings.Contains(string(result), `"type":"enabled"`) {
 		t.Fatalf("translated request lost enabled thinking: %s", result)
 	}
@@ -126,7 +126,7 @@ func TestReasoningRequestFixes_EnabledTrueAdaptiveOnlyPreservesEffort(t *testing
 	caps := &providers.ReasoningCapabilities{ThinkingModes: []string{"adaptive"}}
 	result := applyReasoningSelector([]byte(`{"model":"x"}`), reasoningSelector{Present: true, Enabled: boolPtr(true), Effort: "high"}, providers.ProtocolMessages, caps)
 	// Adaptive mode is preserved, but the unadvertised "high" effort is
-	// dropped rather than forwarded verbatim (e5deab9).
+	// dropped rather than forwarded verbatim (8002965).
 	if !strings.Contains(string(result), `"type":"adaptive"`) {
 		t.Fatalf("adaptive-only enabled request lost adaptive mode: %s", result)
 	}
