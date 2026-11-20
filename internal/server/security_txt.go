@@ -24,7 +24,7 @@ func (s *Server) securityTxtBody(now time.Time) string {
 	if base := strings.TrimRight(s.config.PublicURL, "/"); strings.HasPrefix(base, "https://") {
 		body += "Canonical: " + base + "/.well-known/security.txt\r\n"
 	}
-	return body + "Policy: https://github.com/dellarb/tiller-router/blob/master/SECURITY.md\r\n"
+	return body + "Policy: https://github.com/dellarb/tiller-router/blob/main/SECURITY.md\r\n"
 }
 
 // handleSecurityTxt serves the security contact file as plain text.
