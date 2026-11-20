@@ -90,19 +90,34 @@ jobs:
         id: release
         shell: bash
         run: |
-          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(alpha|beta|rc)\.[0-9]+$ ]]; then
-            echo "Refusing non-alpha/beta/rc or malformed release tag: $GITHUB_REF_NAME" >&2
+          # Accepted tags: vX.Y.Z (stable) and vX.Y.Z-(alpha|beta|rc).N (prerelease).
+          #
+          # Stable releases publish X.Y.Z, vX.Y.Z, X.Y, 'stable' and 'latest'.
+          # Prereleases publish their own version tags plus a channel tag
+          # ('alpha' for alpha, 'beta' for beta/rc) and never move 'latest' or
+          # 'stable', so `:latest` always means the newest stable release.
+          if [[ "$GITHUB_REF_NAME" =~ ^v([0-9]+)\.([0-9]+)\.[0-9]+$ ]]; then
+            stable=true
+            channel=stable
+            minor="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+          elif [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(alpha|beta|rc)\.[0-9]+$ ]]; then
+            stable=false
+            minor=""
+            if [[ "${BASH_REMATCH[1]}" == alpha ]]; then
+              channel=alpha
+            else
+              channel=beta
+            fi
+          else
+            echo "Refusing malformed release tag: $GITHUB_REF_NAME" >&2
             exit 1
           fi
-          version="${GITHUB_REF_NAME#v}"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          # Channel tag: alpha releases tag 'alpha', beta/rc tag 'beta'. 'latest'
-          # always moves to the newest release (alpha or beta).
-          if [[ "$GITHUB_REF_NAME" =~ -alpha\. ]]; then
-            echo "channel=alpha" >> "$GITHUB_OUTPUT"
-          else
-            echo "channel=beta" >> "$GITHUB_OUTPUT"
-          fi
+          {
+            echo "version=${GITHUB_REF_NAME#v}"
+            echo "stable=$stable"
+            echo "channel=$channel"
+            echo "minor=$minor"
+          } >> "$GITHUB_OUTPUT"
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
       - name: Set up Docker Buildx
@@ -122,7 +137,10 @@ jobs:
             type=raw,value=${{ github.ref_name }}
             type=raw,value=${{ steps.release.outputs.version }}
             type=raw,value=${{ steps.release.outputs.channel }}
-            type=raw,value=latest
+            type=raw,value=${{ steps.release.outputs.minor }},enable=${{ steps.release.outputs.stable == 'true' }}
+            type=raw,value=latest,enable=${{ steps.release.outputs.stable == 'true' }}
+          flavor: |
+            latest=false
       - name: Build and push image
         uses: docker/build-push-action@v7
         with:
@@ -137,4 +155,29 @@ jobs:
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "Tiller Router $GITHUB_REF_NAME" --generate-notes --prerelease
+          VERSION: ${{ steps.release.outputs.version }}
+          STABLE: ${{ steps.release.outputs.stable }}
+        shell: bash
+        run: |
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists; leaving it unchanged."
+            exit 0
+          fi
+          args=(--repo "$GITHUB_REPOSITORY" --title "Tiller Router $GITHUB_REF_NAME" --verify-tag)
+          if [[ "$STABLE" == true ]]; then
+            # Stable notes come from the matching CHANGELOG.md section.
+            awk -v want="## [$VERSION]" '
+              index($0, want) == 1 { found = 1; next }
+              found && /^## \[/ { exit }
+              found { print }
+            ' CHANGELOG.md > release-notes.md
+            if [[ -s release-notes.md ]]; then
+              args+=(--notes-file release-notes.md --latest)
+            else
+              echo "No CHANGELOG.md section for $VERSION; using generated notes." >&2
+              args+=(--generate-notes --latest)
+            fi
+          else
+            args+=(--generate-notes --prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" "${args[@]}"

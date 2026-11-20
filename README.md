@@ -12,7 +12,7 @@
   A lightweight, self-hosted LLM router with a control panel built for people who actually change models.
 </p>
 
-> **Beta software.** Tiller Router is in a public beta. The routing core and deployment model are approaching stability, but the API and supported-provider surface may still evolve before a stable `1.0`. Feedback is welcomed but use with caution.
+> **Pre-1.0 software.** Tiller Router `0.1` is the first stable release after the public beta series. The routing core and deployment model are stable enough for everyday use, but the API and supported-provider surface may still change between `0.x` minor releases before `1.0`; breaking changes are listed in the [changelog](CHANGELOG.md). Feedback is welcome.
 
 ---
 
@@ -119,7 +119,7 @@ Tiller includes adapters for a broad set of native and OpenAI-compatible provide
 
 </details>
 
-Provider support varies because upstream APIs vary. The beta should be treated as **verified for the providers explicitly tested** and compatibility/best-effort for the wider OpenAI-compatible surface.
+Provider support varies because upstream APIs vary. Treat Tiller as **verified for the providers explicitly tested** and compatibility/best-effort for the wider OpenAI-compatible surface.
 
 Notes:
 
@@ -150,7 +150,8 @@ Notes:
         restart: unless-stopped
     ```
 
-   
+   `:latest` tracks the newest stable release. To pin a version use `:0.1.0`
+   (exact) or `:0.1` (newest `0.1.x` patch). To follow prereleases use `:beta`.
 
 3. **Start Tiller:**
 
@@ -490,9 +491,9 @@ The project currently targets the Go version declared in `go.mod`.
 
 ## Project status
 
-Tiller Router is in **beta**. The routing model is intentionally narrow and already useful, but the public API, migrations and provider compatibility surface may still evolve before a stable `1.0`. The near-term priority is reliability and hardening.
+Tiller Router is at **0.1**, its first stable release, after ten public betas. The routing model is intentionally narrow and already useful. Because the version is still `0.x`, the public API, migrations and provider compatibility surface may change between minor releases before `1.0`; the [changelog](CHANGELOG.md) calls out breaking changes and upgrade steps. The near-term priority is still reliability and hardening.
 
-Likely post-beta areas include: additional provider validation, richer provider health, cost-aware routing, additional capability metadata, experimental subscription-backed providers such as Codex, and further hardening and operational polish.
+Likely areas for upcoming `0.x` releases include: additional provider validation, richer provider health, cost-aware routing, additional capability metadata, experimental subscription-backed providers such as Codex, and further hardening and operational polish.
 
 ---
 
