@@ -163,7 +163,14 @@ func (l *loginLimiter) recordFailure(key string) bool {
 // allowAttempt charges every request against a fixed window and returns
 // whether it is within the configured request budget. Unlike recordFailure,
 // successful operations do not clear this budget. The request that would
-// exceed the budget starts a lockout and is rejected.
+// exceed the budget is rejected.
+//
+// The window is anchored at the key's first attempt and is NEVER extended by
+// a refused request: the budget refills one window after the burst began, no
+// matter how many attempts were made (or refused) in the meantime. Re-arming
+// the deadline on every refusal would turn a fixed window into an unbounded
+// lockout for any client that keeps retrying, which is precisely the
+// legitimate user this limiter is not meant to punish.
 func (l *loginLimiter) allowAttempt(key string) bool {
 	key = limiterKey(key)
 	l.mu.Lock()
@@ -171,13 +178,7 @@ func (l *loginLimiter) allowAttempt(key string) bool {
 	now := time.Now()
 	f, ok := l.attempts[key]
 	if ok {
-		if !f.until.IsZero() {
-			if now.Before(f.until) {
-				return false
-			}
-			delete(l.attempts, key)
-			ok = false
-		} else if now.Sub(f.first) > l.window {
+		if now.Sub(f.first) > l.window {
 			delete(l.attempts, key)
 			ok = false
 		}
@@ -204,7 +205,8 @@ func (l *loginLimiter) allowAttempt(key string) bool {
 		return true
 	}
 	if f.count >= l.max {
-		f.until = now.Add(l.lockout)
+		// Past the budget for the rest of this window. Refusals are not
+		// counted and do not move the window's end.
 		return false
 	}
 	f.count++
@@ -213,12 +215,6 @@ func (l *loginLimiter) allowAttempt(key string) bool {
 
 func (l *loginLimiter) purgeAttempts(now time.Time) {
 	for key, attempt := range l.attempts {
-		if !attempt.until.IsZero() {
-			if !now.Before(attempt.until) {
-				delete(l.attempts, key)
-			}
-			continue
-		}
 		if now.Sub(attempt.first) > l.window {
 			delete(l.attempts, key)
 		}

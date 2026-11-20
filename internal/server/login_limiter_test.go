@@ -238,3 +238,33 @@ func TestLoginLimiterSharesBudgetAcrossIPv6Prefix(t *testing.T) {
 		t.Fatal("a different /64 must keep its own budget")
 	}
 }
+
+// TestLoginLimiterRefusalsDoNotExtendWindow proves a refused attempt does not
+// re-arm the fixed window. A previous implementation pushed the block out by
+// one full lockout on every refusal, so a client that kept retrying (a
+// pen-test loop, a polling probe, or simply a user clicking signup again)
+// never regained its budget, however long it waited.
+func TestLoginLimiterRefusalsDoNotExtendWindow(t *testing.T) {
+	t.Parallel()
+	window := 120 * time.Millisecond
+	l := newLoginLimiter(1, window, time.Hour)
+	if !l.allowAttempt("1.2.3.4") {
+		t.Fatal("first attempt should be admitted")
+	}
+	// Refuse repeatedly across the window. Each refusal used to restart the
+	// block, so the budget was never restored while the client kept trying.
+	for i := 0; i < 3; i++ {
+		if l.allowAttempt("1.2.3.4") {
+			t.Fatal("over-budget attempt was admitted")
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	// The window began at the first attempt and must end one window later.
+	deadline := time.Now().Add(window)
+	for !l.allowAttempt("1.2.3.4") {
+		if time.Now().After(deadline) {
+			t.Fatal("budget did not refill: refusals extended the window")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

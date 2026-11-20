@@ -371,7 +371,10 @@ func TestSignupAttemptBudgetSurvivesSuccessfulSignup(t *testing.T) {
 	t.Parallel()
 	_, api, _ := hostedServerHarness(t, false)
 	enableTestCaptcha(t, api.server)
-	for i := 0; i < 5; i++ {
+	// Loop to the live per-IP budget rather than a hardcoded count so the test
+	// tracks server.go instead of drifting when the budget is retuned.
+	budget := api.server.signupLimiter.max
+	for i := 0; i < budget; i++ {
 		status, payload, _ := api.request("POST", "/api/auth/signup", map[string]any{
 			"email": fmt.Sprintf("signup-%d@example.com", i), "accept_terms": true, "captcha_token": "signup",
 		})
