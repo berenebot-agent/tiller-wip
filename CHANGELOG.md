@@ -1,10 +1,68 @@
 # Changelog
 
 All notable changes to Tiller Router are recorded here. This project follows
-semantic versioning conventions where practical; the beta API and deployment
-behavior may still change before a stable `1.0`.
+semantic versioning conventions where practical; while the version is `0.x`,
+the API and deployment behavior may still change between minor releases before
+a stable `1.0`.
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-11-20
+
+First non-prerelease version, ending the `0.1.0` beta series. Tiller Router is
+still pre-`1.0`: the management API, migrations and provider compatibility
+surface may change between minor releases, and breaking changes will be called
+out here.
+
+This section covers everything since `0.1.0-beta.5`. Betas 6 to 10 were
+published without their own changelog sections; their release notes are on
+GitHub:
+[beta.6](https://github.com/dellarb/tiller-router/releases/tag/v0.1.0-beta.6),
+[beta.7](https://github.com/dellarb/tiller-router/releases/tag/v0.1.0-beta.7),
+[beta.8](https://github.com/dellarb/tiller-router/releases/tag/v0.1.0-beta.8),
+[beta.9](https://github.com/dellarb/tiller-router/releases/tag/v0.1.0-beta.9),
+[beta.10](https://github.com/dellarb/tiller-router/releases/tag/v0.1.0-beta.10).
+
+### Upgrade notes
+
+- **Back up the data directory and encryption key first.** Migrations run
+  automatically at startup, and starting an older binary against a newer
+  schema is refused by default, so a backup is the rollback path.
+- Coming from beta.10 or later: the only schema change is migration `056`
+  (hosted traffic totals); no configuration changes are needed.
+- Coming from an earlier beta: read the upgrade notes of each GitHub beta
+  release you skip. The ones that need action are hosted-only:
+  `TILLER_PLATFORM_ADMIN_PASSWORD` must be at least 16 characters (beta.9),
+  hosted signup sets the password on the email-verification page (beta.9), a
+  dedicated platform console port must be firewalled or VPN-restricted
+  (beta.10), and management API discovery renamed `request_body_bytes` to
+  `admin_request_body_bytes` (beta.10).
+- Docker users following `:latest` now receive stable releases only (see
+  below).
+
+### Known limitations
+
+- **Burst limits on non-streaming responses.** At most 32 non-streaming upstream
+  responses are buffered at once, process-wide. Beyond that, an attempt fails
+  immediately instead of queuing, and the client receives
+  `502 upstream_response_too_large` even though the response was not too
+  large. In load testing this first appeared above 40 concurrent
+  non-streaming requests; streaming requests are not affected. A retryable
+  "busy" status is planned.
+- **First burst after a restart.** Until the client-key verification cache
+  warms, a burst of new connections can receive
+  `429 authentication_temporarily_unavailable` with `Retry-After: 1`. SDKs
+  that retry 429 recover automatically.
+
+### Release and container images
+
+- **Stable release tags publish stable images.** `v0.1.0`-style tags now pass
+  the release workflow and publish `0.1.0`, `v0.1.0`, `0.1`, `stable` and
+  `latest`. Prerelease tags (`-alpha.N`, `-beta.N`, `-rc.N`) publish their
+  version tag and `alpha`/`beta` channel tag only and **no longer move
+  `latest`**, so `ghcr.io/dellarb/tiller-router:latest` now always means the
+  newest stable release. Use `:beta` to follow prereleases. Stable GitHub
+  releases take their notes from this file.
 
 ### Security
 
@@ -127,6 +185,13 @@ behavior may still change before a stable `1.0`.
   loss, and caps unexpanded completed rows at 200 with an omission notice.
   Live updates contain metadata only; detailed error bodies remain in the
   existing authenticated Activity history, never in the live feed.
+- **First-party hosted traffic totals.** Platform Settings gains a server-side
+  totals switch, separate from browser analytics and off by default. When
+  enabled, Platform Overview shows daily UTC counts of landing/login, privacy
+  and terms page loads and of self-service account creations, kept for 90
+  days. Only the date, metric and count are stored. Hosted mode only; see
+  `docs/ADVANCED.md`.
+- **Upstream GitHub link in the console top bar.**
 
 ### Changed
 
@@ -161,6 +226,21 @@ behavior may still change before a stable `1.0`.
 
 ### Fixed
 
+- **OAuth token refresh no longer races.** Refresh writes are fenced so a
+  stalled refresh cannot overwrite newer credentials. A caller that arrives
+  after a refresh has already completed re-reads the token, so it no longer
+  starts a second, redundant upstream refresh. Forced refreshes (operator
+  refresh, reconnect probe) still always reach the provider.
+- **Provider-card refresh spinner no longer sticks.** Returning to Providers
+  could leave a card showing "Refreshing" after the check had finished.
+- **Console touch and input fixes.** Catalogue-editor switches toggle on tap
+  and have a larger touch target, completed switch clicks are honoured, and
+  search boxes no longer offer browser autofill history.
+- **Platform console route matching.** Only the platform console's own entry
+  routes are served as the console.
+- **Third-party licence files match the shipped modules.** The image now
+  derives licence file names and versions from the Go module graph, so the
+  bundled notices cannot drift from the dependencies actually compiled in.
 - **Cache invalidation no longer signs other tenants out.** Client-key,
   management-token and customer/platform session caches fenced every
   verification with one process-wide counter, so rotating a key or logging out
@@ -703,3 +783,6 @@ Initial public FOSS alpha release.
   Kubernetes deployment are outside this release's scope.
 - Model capabilities and streaming/tool behavior depend on the selected
   provider and model; verify them before production use.
+
+[Unreleased]: https://github.com/dellarb/tiller-router/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/dellarb/tiller-router/compare/v0.1.0-beta.5...v0.1.0

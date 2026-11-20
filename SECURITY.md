@@ -1,7 +1,14 @@
 # Security policy
 
-Tiller Router is a beta release. Please do not disclose a suspected
+Tiller Router is pre-1.0 software (`0.x`). Please do not disclose a suspected
 vulnerability in a public issue, discussion, or pull request.
+
+## Supported versions
+
+Security fixes are made on `master` and shipped in the next release of the
+newest `0.x` minor line (currently `0.1.x`). Older minor lines and prerelease
+(`-alpha`, `-beta`, `-rc`) tags do not receive backported fixes; upgrade to the
+latest release.
 
 ## Reporting a vulnerability
 
@@ -17,7 +24,7 @@ credentials, client API keys, session cookies, prompts, and responses.
 
 We will acknowledge reports when practical and coordinate a fix, disclosure,
 and credit with the reporter. There is no guaranteed response or remediation
-SLA for beta releases.
+SLA for `0.x` releases.
 
 ## Scope and deployment notes
 
@@ -186,7 +193,7 @@ logging* below). Customer login and recovery
 requests have in-memory per-IP budgets; login and recovery also use normalized-
 email keyed throttles. The per-email login failure lockout can temporarily block
 an account after repeated failed attempts regardless of source IP; this targeted
-denial-of-service tradeoff is accepted for beta and can be revisited if observed.
+denial-of-service tradeoff is accepted for `0.x` and can be revisited if observed.
 
 **Account self-service.** Hosted customers manage their identity from the
 Account tab. Changing the password or email, signing out everywhere, and
@@ -287,6 +294,18 @@ acceptable-use rules) and the Privacy Policy (which documents the subprocessors
 and security/data-handling posture) are operator-editable and served publicly so
 signup can link them before authentication. Signup records the accepted document
 timestamps in `legal_acceptances`.
+
+## Historical repository contents
+
+Earlier commits contain internal planning documents that have since been removed
+from the tree: an agent working guide (`AGENTS.md`), the hosted design decision
+record (`docs/hosted_decisions.md`) and a pre-launch security review
+(`docs/pre_saas_release_review.md`). They contain no credentials or secrets.
+Every high-severity finding in that review was fixed before the hosted service
+opened, and the remaining items are documented above as accepted tradeoffs. The
+history has deliberately not been rewritten, because those commits were already
+public and a rewrite would break existing clones and release tags. Treat those
+documents as a historical record, not a description of current behaviour.
 
 For questions that are not security reports, please use the project's normal
 public issue and discussion channels.

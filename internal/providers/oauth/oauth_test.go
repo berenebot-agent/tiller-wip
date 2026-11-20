@@ -301,17 +301,12 @@ func TestForceRefreshTransitionsAuthStateOnFailure(t *testing.T) {
 // TestRefreshManagerDeduplicatesConcurrentRefresh asserts the refresh
 // single-flight guard collapses concurrent callers into one refresh.
 //
-// Deliberately NOT parallel, and it is a load-sensitive assertion even so.
-// Manager.refresh() is best-effort single-flight: Current() reads the token,
-// then calls refresh(), which joins-or-creates the in-flight call. A caller
-// descheduled between that read and the join can observe the flight already
-// completed (and delete itself) and start a second one. That is a
-// check-then-act window in the runtime guard, not a test artefact; running the
-// 20 callers while 400+ sibling tests compete for the CPU makes it observable.
-// Running this test serial removes the sibling contention that triggers it.
-// Airtight dedup needs a freshness re-check under the flight in Manager.refresh
-// (which would also change the token-refresh path), so it is left for a
-// deliberate change rather than folded into the test-speed work.
+// Current() reads the token, then calls refresh(), which joins-or-creates the
+// in-flight call. A caller descheduled between that read and the join can
+// arrive after the flight already completed and deleted itself, carrying a
+// stale view of the token. refresh() therefore re-checks freshness under the
+// flight and returns the stored token instead of issuing a second upstream
+// call, which is what keeps this test stable under CPU contention.
 func TestRefreshManagerDeduplicatesConcurrentRefresh(t *testing.T) {
 	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
@@ -364,6 +359,67 @@ func TestRefreshManagerDeduplicatesConcurrentRefresh(t *testing.T) {
 	record := testToken(t, st, "provider-1")
 	if record.RefreshToken != "rotated" {
 		t.Fatalf("stored refresh token = %q", record.RefreshToken)
+	}
+}
+
+// TestRefreshManagerSkipsRefreshWhenFlightAlreadyCompleted pins the freshness
+// re-check in Manager.refresh: a caller that read the token before a concurrent
+// refresh landed, and only joins-or-starts afterwards, must return the stored
+// credentials rather than issuing a second upstream refresh. This is the
+// check-then-act window that TestRefreshManagerDeduplicatesConcurrentRefresh
+// observes intermittently under CPU contention, reproduced deterministically.
+func TestRefreshManagerSkipsRefreshWhenFlightAlreadyCompleted(t *testing.T) {
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := database.Now()
+	if _, err := db.SQL.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES('oauth-provider','real','provider-1')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,enabled,protocols,created_at,updated_at) VALUES('provider-1','oauth-provider','codex-subscription','https://provider.invalid',1,'["responses"]',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	st := newTestStore(t, db)
+	expired := time.Now().Add(-time.Minute)
+	if err := st.PutOAuthToken(context.Background(), TokenToStore(TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "refresh", TokenType: "Bearer", ExpiresAt: &expired, AuthState: AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()})); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(store.New(db.SQL), time.Minute)
+	var calls atomic.Int32
+	refresh := func(context.Context, TokenRecord) (TokenResponse, error) {
+		calls.Add(1)
+		return TokenResponse{AccessToken: "new", RefreshToken: "rotated", ExpiresIn: 3600}, nil
+	}
+
+	// Simulate the losing side of the race: Current() has already read the
+	// expired token, and by the time it reaches refresh() an earlier flight has
+	// completed and refreshed it.
+	first, err := manager.Current(context.Background(), database.LocalAccountID, "provider-1", refresh)
+	if err != nil {
+		t.Fatalf("first Current: %v", err)
+	}
+	if first.AccessToken != "new" {
+		t.Fatalf("first access token = %q", first.AccessToken)
+	}
+	second, err := manager.refresh(context.Background(), database.LocalAccountID, "provider-1", refresh, false)
+	if err != nil {
+		t.Fatalf("second refresh: %v", err)
+	}
+	if second.AccessToken != "new" {
+		t.Fatalf("second access token = %q, want the already-refreshed one", second.AccessToken)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("refresh calls = %d, want 1", got)
+	}
+	// The flight must not be left behind: a later caller has to be able to
+	// refresh once the token expires again.
+	manager.mu.Lock()
+	leftover := manager.calls[database.LocalAccountID+"\x00"+"provider-1"]
+	manager.mu.Unlock()
+	if leftover != nil {
+		t.Fatal("a completed refresh should clear its call entry")
 	}
 }
 
@@ -560,6 +616,13 @@ func TestPersistableRefreshErrorRespectsDisconnect(t *testing.T) {
 	}
 }
 
+// TestRefreshManagerAbandonsStuckCall pins the leak guard: a refresh whose
+// goroutine never publishes a result must not pin every later caller (and, via
+// the quota poller's credential hydration, the provider's in-flight state)
+// forever. Once the entry is older than callWaitTimeout it is replaced. It also
+// pins the write fence: a superseded refresh that returns late must not
+// overwrite the replacement's credentials or auth state, whichever way it
+// finished.
 func TestRefreshManagerAbandonsStuckCall(t *testing.T) {
 	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
