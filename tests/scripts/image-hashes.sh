@@ -42,11 +42,13 @@ browser_hash_inputs() {
         -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null | sha256sum | cut -c1-12
 }
 
-# Fixturectl: its Go source + Dockerfile, plus go.mod/go.sum (it builds from the
-# repo root context).
+# Fixturectl: its Go source + Dockerfile, the internal/database package it
+# links (including the embedded migrations, so a new migration rebuilds it
+# rather than leaving a binary that refuses the newer schema), plus
+# go.mod/go.sum (it builds from the repo root context).
 fixture_hash_inputs() {
     {
-        find "$repo_dir/tests/fixturectl" -type f \( -name '*.go' -o -name 'Dockerfile' \) -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
+        find "$repo_dir/tests/fixturectl" "$repo_dir/internal/database" -type f \( -name '*.go' -o -name '*.sql' -o -name 'Dockerfile' \) ! -name '*_test.go' -print0 2>/dev/null | sort -z | xargs -0 cat 2>/dev/null
         cat "$repo_dir/go.mod" "$repo_dir/go.sum"
     } | sha256sum | cut -c1-12
 }
