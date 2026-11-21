@@ -15,6 +15,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database/dbtest"
+	"github.com/tiller-router/tiller-router/internal/store"
 	"github.com/tiller-router/tiller-router/internal/testutil/fastsecret"
 )
 
@@ -161,5 +162,65 @@ func TestPlatformConsoleMovesToDedicatedListener(t *testing.T) {
 	// The insecure cookie name is not honoured by the public handler's rules.
 	if cookie.Name == platformSessionCookie {
 		t.Fatal("dedicated listener over HTTP must not use the __Host- cookie")
+	}
+}
+
+func enablePlatformTurnstile(t *testing.T, app *Server) {
+	t.Helper()
+	err := app.storeHandle().SavePlatformSettings(context.Background(), store.PlatformSettingsProposal{
+		AuditRetentionDays: 30,
+		Auth:               store.PlatformAuthSettings{TurnstileEnabled: true, TurnstileSiteKey: "test-site", TurnstileSecret: "test-secret"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func platformProbe(t *testing.T, base string) map[string]any {
+	t.Helper()
+	resp, err := http.Get(base + "/api/platform/session/probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	payload := map[string]any{}
+	_ = json.NewDecoder(resp.Body).Decode(&payload)
+	return payload
+}
+
+// A console on the public listener is challenged on every login once Turnstile
+// is configured, with no failure history needed.
+func TestPlatformLoginRequiresTurnstileOnPublicPort(t *testing.T) {
+	app := platformTestServer(t, 0)
+	enablePlatformTurnstile(t, app)
+	srv := httptest.NewServer(app.Handler())
+	t.Cleanup(srv.Close)
+	if p := platformProbe(t, srv.URL); p["turnstile_enabled"] != true || p["turnstile_site_key"] != "test-site" {
+		t.Fatalf("public probe = %v, want Turnstile enabled", p)
+	}
+	resp, payload := platformLoginRequest(t, http.DefaultClient, srv.URL, "")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("public login without a token = %d %v, want 403 captcha_required", resp.StatusCode, payload)
+	}
+}
+
+// A console on the dedicated platform port is never challenged, even when
+// Turnstile is configured for the public site.
+func TestPlatformLoginSkipsTurnstileOnDedicatedPort(t *testing.T) {
+	app := platformTestServer(t, 9443)
+	enablePlatformTurnstile(t, app)
+	private := httptest.NewServer(app.PlatformHandler())
+	t.Cleanup(private.Close)
+	if p := platformProbe(t, private.URL); p["turnstile_enabled"] != false || p["turnstile_site_key"] != "" {
+		t.Fatalf("dedicated-port probe = %v, want Turnstile disabled", p)
+	}
+	// Even after the global failure threshold, no challenge is demanded.
+	for i := 0; i < 20; i++ {
+		app.platformGlobalLimiter.recordFailure(platformGlobalKey)
+	}
+	jar, _ := cookiejar.New(nil)
+	resp, payload := platformLoginRequest(t, &http.Client{Jar: jar}, private.URL, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("dedicated-port login without a token = %d %v, want 200", resp.StatusCode, payload)
 	}
 }

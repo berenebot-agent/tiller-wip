@@ -54,9 +54,11 @@ func (s *Server) platformLogin(w http.ResponseWriter, r *http.Request) {
 		respondDecodeError(w, err)
 		return
 	}
-	// Escalate distributed failures to a challenge, never a global credential
-	// lockout. Without Turnstile configured, per-IP throttling remains.
-	if s.platformGlobalLimiter.locked(platformGlobalKey) && !s.verifyAuthCaptcha(w, r, input.CaptchaToken, "platform_login") {
+	// A console on the public listener is challenged on every login (when
+	// Turnstile is configured). A console on the dedicated TILLER_PLATFORM_PORT
+	// listener is operator-only and reached over a restricted network, where a
+	// Cloudflare challenge cannot run, so it relies on per-IP throttling alone.
+	if s.platformCaptchaRequired() && !s.verifyAuthCaptcha(w, r, input.CaptchaToken, "platform_login") {
 		return
 	}
 	if !s.identity.AuthenticatePlatform(input.Username, input.Password, s.config.TillerPlatformAdminUser, s.config.TillerPlatformAdminPassword) {
@@ -74,6 +76,12 @@ func (s *Server) platformLogin(w http.ResponseWriter, r *http.Request) {
 	s.setPlatformSessionCookie(w, r, session.Token, session.ExpiresAt)
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.login", ActorType: "platform"})
 	writeJSON(w, http.StatusOK, s.platformSessionPayload(r, session))
+}
+
+// platformCaptchaRequired reports whether console logins are Turnstile
+// challenged: only when the console shares the public listener.
+func (s *Server) platformCaptchaRequired() bool {
+	return s.config.PlatformPort == 0
 }
 
 func (s *Server) requirePlatform(next http.Handler) http.Handler {
@@ -111,7 +119,8 @@ func (s *Server) platformSessionStatus(w http.ResponseWriter, r *http.Request) {
 // platformLoginProbe is the unauthenticated companion to platformSessionStatus.
 // It always answers 401, and alongside the usual error body tells the console
 // whether this deployment challenges console logins, so the login card can
-// mount its Turnstile widget before the first submit. Only the public site key
+// mount its Turnstile widget before the first submit. A console on the
+// dedicated platform port is never challenged, so it always reports disabled. Only the public site key
 // is exposed; it is embedded in every page that renders a widget.
 //
 // The console has no access to /api/auth/options (that is a customer-app route),
@@ -122,7 +131,7 @@ func (s *Server) platformLoginProbe(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusUnauthorized, "unauthorized", "Platform authentication required.")
 		return
 	}
-	enabled := settings.TurnstileEnabled && settings.TurnstileSiteKey != "" && settings.TurnstileSecret != ""
+	enabled := s.platformCaptchaRequired() && settings.TurnstileEnabled && settings.TurnstileSiteKey != "" && settings.TurnstileSecret != ""
 	siteKey := ""
 	if enabled {
 		siteKey = settings.TurnstileSiteKey
