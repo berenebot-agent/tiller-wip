@@ -181,8 +181,11 @@ For bot protection, create a Cloudflare Turnstile widget and allow your hosted
 hostname in its widget settings. Enter its site key and secret key in the
 platform dashboard, then enable Turnstile. The site key is public; the secret
 is kept server-side. Turnstile protects signup, verification resend, password
-reset requests, and the start of Google sign-in. Password login keeps its
-existing rate limits. Turnstile works without routing the site through
+reset requests, and the start of Google sign-in. Customer password login keeps
+its existing rate limits. Platform console login is also challenged when the
+console shares the public listener, but not when it is served on its own
+`TILLER_PLATFORM_PORT` listener (for example VPN-only), where it relies on
+per-IP rate limits. Turnstile works without routing the site through
 Cloudflare. See the [Google web-server OAuth guide](https://developers.google.com/identity/protocols/oauth2/web-server)
 and [Cloudflare Turnstile setup guide](https://developers.cloudflare.com/turnstile/get-started/).
 
