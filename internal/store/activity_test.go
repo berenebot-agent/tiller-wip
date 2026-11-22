@@ -38,6 +38,7 @@ func TestActivityIsAccountScoped(t *testing.T) {
 	ctx := context.Background()
 	local := st.For(database.LocalAccountID)
 	other := st.For(otherAccount)
+	body := "private response"
 
 	insert := func(sc *store.Scope, id, clientID string) {
 		t.Helper()
@@ -51,6 +52,7 @@ func TestActivityIsAccountScoped(t *testing.T) {
 			HTTPStatus:        200,
 			LatencyMs:         1,
 			ClientRequestID:   id,
+			ResponseBody:      &body,
 			CreatedAt:         database.Now(),
 			Attempts: []store.RequestAttemptInsert{{
 				Provider:  "provider-a",
@@ -70,11 +72,15 @@ func TestActivityIsAccountScoped(t *testing.T) {
 		t.Fatalf("live recovery crossed account boundary: %v %v", ids(tracked), err)
 	}
 
+	if tracked[0].ResponseBody != nil {
+		t.Fatal("live activity exposed a response body")
+	}
+
 	globalLocal, err := local.ListGlobalActivity(ctx, "", 100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(globalLocal) != 1 || globalLocal[0].ID != "row-local" || !globalLocal[0].ReasoningStripped {
+	if len(globalLocal) != 1 || globalLocal[0].ID != "row-local" || !globalLocal[0].ReasoningStripped || globalLocal[0].ResponseBody == nil || *globalLocal[0].ResponseBody != body {
 		t.Fatalf("local account sees %d rows (%v), want only row-local", len(globalLocal), ids(globalLocal))
 	}
 	globalOther, err := other.ListGlobalActivity(ctx, "", 100, 0)

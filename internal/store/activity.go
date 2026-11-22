@@ -64,6 +64,8 @@ type ActivityRow struct {
 	ErrorMessage             *string
 	RequestBody              *string
 	RequestBodyTruncated     bool
+	ResponseBody             *string
+	ResponseBodyTruncated    bool
 	ErrorBody                *string
 	ErrorBodyTruncated       bool
 	AttemptCount             int
@@ -91,15 +93,15 @@ type RequestAttemptRow struct {
 	CreatedAt          string
 }
 
-const activityColumns = `rl.id,rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.cache_creation_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.error_message,rl.request_body,rl.request_body_truncated,rl.error_body,rl.error_body_truncated,rl.attempt_count,(SELECT COUNT(*) FROM request_attempts ra WHERE ra.request_log_id=rl.id AND ra.account_id=rl.account_id),rl.fallback_used,rl.fallback_reason,rl.created_at,rl.estimated_cost_micros,rl.provider_cost_micros,rl.input_tokens_source,rl.output_tokens_source,rl.reasoning_stripped`
+const activityColumns = `rl.id,rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.cache_creation_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.error_message,rl.request_body,rl.request_body_truncated,rl.response_body,rl.response_body_truncated,rl.error_body,rl.error_body_truncated,rl.attempt_count,(SELECT COUNT(*) FROM request_attempts ra WHERE ra.request_log_id=rl.id AND ra.account_id=rl.account_id),rl.fallback_used,rl.fallback_reason,rl.created_at,rl.estimated_cost_micros,rl.provider_cost_micros,rl.input_tokens_source,rl.output_tokens_source,rl.reasoning_stripped`
 
 func (s *Scope) scanActivityRows(rows *sql.Rows, withClientKey, withClientName bool) ([]ActivityRow, error) {
 	defer rows.Close()
 	out := []ActivityRow{}
 	for rows.Next() {
 		var v ActivityRow
-		var streaming, fallback, bodyTruncated, errorTruncated int
-		dest := []any{&v.ID, &v.RequestedModel, &v.ExposedModel, &v.RouteKind, &v.RouteModelID, &v.RouteModel, &v.ResolvedProvider, &v.ResolvedModel, &v.Protocol, &streaming, &v.HTTPStatus, &v.LatencyMs, &v.InputTokens, &v.OutputTokens, &v.CacheReadInputTokens, &v.CacheCreationInputTokens, &v.ProviderRequestID, &v.ClientRequestID, &v.ErrorText, &v.ErrorMessage, &v.RequestBody, &bodyTruncated, &v.ErrorBody, &errorTruncated, &v.AttemptCount, &v.AttemptRows, &fallback, &v.FallbackReason, &v.CreatedAt}
+		var streaming, fallback, bodyTruncated, responseTruncated, errorTruncated int
+		dest := []any{&v.ID, &v.RequestedModel, &v.ExposedModel, &v.RouteKind, &v.RouteModelID, &v.RouteModel, &v.ResolvedProvider, &v.ResolvedModel, &v.Protocol, &streaming, &v.HTTPStatus, &v.LatencyMs, &v.InputTokens, &v.OutputTokens, &v.CacheReadInputTokens, &v.CacheCreationInputTokens, &v.ProviderRequestID, &v.ClientRequestID, &v.ErrorText, &v.ErrorMessage, &v.RequestBody, &bodyTruncated, &v.ResponseBody, &responseTruncated, &v.ErrorBody, &errorTruncated, &v.AttemptCount, &v.AttemptRows, &fallback, &v.FallbackReason, &v.CreatedAt}
 		dest = append(dest, &v.EstimatedCostMicros, &v.ProviderCostMicros, &v.InputTokensSource, &v.OutputTokensSource, &v.ReasoningStripped)
 		if withClientKey {
 			dest = append(dest, &v.ClientKeyID)
@@ -113,6 +115,7 @@ func (s *Scope) scanActivityRows(rows *sql.Rows, withClientKey, withClientName b
 		v.Streaming = streaming != 0
 		v.FallbackUsed = fallback != 0
 		v.RequestBodyTruncated = bodyTruncated != 0
+		v.ResponseBodyTruncated = responseTruncated != 0
 		v.ErrorBodyTruncated = errorTruncated != 0
 		out = append(out, v)
 	}
@@ -197,6 +200,7 @@ func (s *Scope) LiveActivityByIDs(ctx context.Context, ids []string) ([]Activity
 	}
 	columns := strings.ReplaceAll(activityColumns, "rl.request_body,", "NULL,")
 	columns = strings.ReplaceAll(columns, "rl.error_body,", "NULL,")
+	columns = strings.ReplaceAll(columns, "rl.response_body,", "NULL,")
 	columns = strings.ReplaceAll(columns, "rl.error_message,", "NULL,")
 	err := s.withActivity(ctx, func(q querier) error {
 		rows, err := q.QueryContext(ctx, `SELECT `+columns+`,rl.client_key_id,rl.client_name FROM request_logs rl WHERE rl.account_id=? AND rl.id IN (`+strings.Join(marks, ",")+`)`, args...)

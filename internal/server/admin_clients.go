@@ -39,6 +39,7 @@ type clientKeyView struct {
 	Enabled               bool    `json:"enabled"`
 	LoggingEnabled        bool    `json:"logging_enabled"`
 	LogErrorBodies        string  `json:"log_error_bodies"`
+	LogAllBodies          string  `json:"log_all_bodies"`
 	RetentionDays         int     `json:"retention_days"`
 	CreatedAt             string  `json:"created_at"`
 	RotatedAt             *string `json:"rotated_at"`
@@ -78,6 +79,7 @@ func (s *Server) listClientKeys(w http.ResponseWriter, r *http.Request) {
 			Enabled:               row.Enabled,
 			LoggingEnabled:        row.LoggingEnabled,
 			LogErrorBodies:        row.LogErrorBodies,
+			LogAllBodies:          row.LogAllBodies,
 			RetentionDays:         row.RetentionDays,
 			CreatedAt:             row.CreatedAt,
 			UpdatedAt:             row.UpdatedAt,
@@ -210,6 +212,7 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		Enabled                *bool   `json:"enabled"`
 		LoggingEnabled         *bool   `json:"logging_enabled"`
 		LogErrorBodies         *string `json:"log_error_bodies"`
+		LogAllBodies           *string `json:"log_all_bodies"`
 		RetentionDays          *int    `json:"retention_days"`
 		Type                   *string `json:"type"`
 		SingleModelName        *string `json:"single_model_name"`
@@ -236,6 +239,14 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		bodyLogMode = strings.TrimSpace(*input.LogErrorBodies)
 		if !store.ValidBodyLogMode(bodyLogMode) {
 			adminError(w, 400, "invalid_body_log_mode", "Detailed error body logging must be inherit, always or never.")
+			return
+		}
+	}
+	allBodyLogMode := ""
+	if input.LogAllBodies != nil {
+		allBodyLogMode = strings.TrimSpace(*input.LogAllBodies)
+		if !store.ValidBodyLogMode(allBodyLogMode) {
+			adminError(w, 400, "invalid_body_log_mode", "All body logging must be inherit, always or never.")
 			return
 		}
 	}
@@ -354,6 +365,7 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		Logging:        loggingEnabled,
 		LoggingSet:     input.LoggingEnabled != nil,
 		LogErrorBodies: bodyLogMode,
+		LogAllBodies:   allBodyLogMode,
 		Retention:      retentionDays,
 		RetentionSet:   input.RetentionDays != nil,
 		BindingSet:     writeBinding,
@@ -398,6 +410,9 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.LogErrorBodies != nil {
 		changed = append(changed, "log_error_bodies")
+	}
+	if input.LogAllBodies != nil {
+		changed = append(changed, "log_all_bodies")
 	}
 	if input.RetentionDays != nil {
 		changed = append(changed, "retention_days")

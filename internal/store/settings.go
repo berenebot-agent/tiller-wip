@@ -12,6 +12,7 @@ const (
 	SettingDefaultLoggingEnabled              = "default_logging_enabled"
 	SettingDefaultRetentionDays               = "default_retention_days"
 	SettingLogErrorBodies                     = "log_error_bodies"
+	SettingLogAllBodies                       = "log_all_bodies"
 	SettingFallbackTimeoutSeconds             = "fallback_timeout_seconds"
 	SettingNotificationsEnabled               = "notifications_enabled"
 	SettingNotificationsWebhookURL            = "notifications_webhook_url"
@@ -104,6 +105,15 @@ func (s *Scope) GetLoggingDefaults(ctx context.Context) (enabled bool, retention
 // should be retained. The safe default is disabled.
 func (s *Scope) GetLogErrorBodies(ctx context.Context) (bool, error) {
 	v, err := s.GetBool(ctx, SettingLogErrorBodies)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return v, err
+}
+
+// GetLogAllBodies returns the account opt-in for all request and response bodies.
+func (s *Scope) GetLogAllBodies(ctx context.Context) (bool, error) {
+	v, err := s.GetBool(ctx, SettingLogAllBodies)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

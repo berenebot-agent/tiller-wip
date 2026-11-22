@@ -77,6 +77,8 @@ CREATE TABLE IF NOT EXISTS request_logs (
 	error_message TEXT,
 	request_body TEXT,
 	request_body_truncated INTEGER NOT NULL DEFAULT 0 CHECK (request_body_truncated IN (0,1)),
+	response_body TEXT,
+	response_body_truncated INTEGER NOT NULL DEFAULT 0 CHECK (response_body_truncated IN (0,1)),
 	error_body TEXT,
 	error_body_truncated INTEGER NOT NULL DEFAULT 0 CHECK (error_body_truncated IN (0,1)),
 	attempt_count INTEGER NOT NULL DEFAULT 1,
@@ -264,6 +266,16 @@ var activityUpgrades = []struct {
 			skipIfVersion      string
 		}{
 			{"request_logs", "reasoning_stripped", `ALTER TABLE request_logs ADD COLUMN reasoning_stripped INTEGER NOT NULL DEFAULT 0 CHECK (reasoning_stripped IN (0,1))`, ""},
+		},
+	},
+	{
+		version: "009_response_bodies",
+		columns: []struct {
+			table, column, ddl string
+			skipIfVersion      string
+		}{
+			{"request_logs", "response_body", `ALTER TABLE request_logs ADD COLUMN response_body TEXT`, ""},
+			{"request_logs", "response_body_truncated", `ALTER TABLE request_logs ADD COLUMN response_body_truncated INTEGER NOT NULL DEFAULT 0 CHECK (response_body_truncated IN (0,1))`, ""},
 		},
 	},
 }

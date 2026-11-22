@@ -266,6 +266,17 @@ retention window. Turning the setting off stops new captures; it does not purge
 bodies already stored. Deleting the account removes them along with the rest of
 its Activity history.
 
+**All message body logging (opt-in).** A separate Log All Message Bodies setting
+captures client request and client-visible response bodies for successful and
+failed requests, in local and hosted mode. It is off by default and has its
+own per-client inherit/always/never override. Normal client activity logging
+must also be enabled. Each body is bounded to 1 MiB; streaming responses are
+recorded as client-visible wire events, including any keepalives. The captured
+content can include prompts, tool arguments, and reasoning. It is retained under
+the client key's Activity retention, appears in authenticated Activity views
+and CSV exports, and is excluded from live Activity events. Switching it off
+stops new capture without deleting prior records. Expect increased storage use.
+
 **Hosted quota and onboarding controls.** Hosted accounts are subject to plan
 entitlements (provider/client-key/virtual-model creation, concurrent streams,
 monthly routed requests, and Activity retention). Quota rejections are `429`

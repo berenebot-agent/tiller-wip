@@ -25,6 +25,7 @@ test('activity records real inference: success, upstream failure, and ordered fa
   await mockFailModel(page, 'mock-model');
 
   const client = await createClient(page, csrf, 'activity-e2e-client');
+  expect((await page.request.patch(`/api/admin/client-keys/${client.id}`, { headers: { 'X-CSRF-Token': csrf }, data: { log_all_bodies: 'always' } })).status()).toBe(204);
 
   // Ordered fallback virtual model: mock-model (500) -> mock-model-b (ok).
   const groupRes = await page.request.post('/api/admin/virtual-groups', { headers: { 'X-CSRF-Token': csrf }, data: { name: 'activity-e2e-group' } });
@@ -60,6 +61,8 @@ test('activity records real inference: success, upstream failure, and ordered fa
   const failure = rows.find(r => r.http_status === 500);
   expect(fallback).toBeTruthy();
   expect(success).toBeTruthy();
+  expect(success.request_body).toContain('e2e');
+  expect(success.response_body).toBeTruthy();
   expect(failure).toBeTruthy();
 
   // Success row: resolved target, one success attempt.
@@ -99,6 +102,10 @@ test('activity records real inference: success, upstream failure, and ordered fa
   await page.locator('[data-activity-tab="history"]').click();
   await expect(page.locator('#activity-panel-history')).toBeVisible();
   await expect(page.locator('#global-activity-body tr')).toHaveCount(3);
+  await page.locator('#global-activity-body .attempt-success[data-error-key]').first().click();
+  await expect(page.locator('#error-body')).toContainText('Client request body:');
+  await expect(page.locator('#error-body')).toContainText('Client response body:');
+  await page.locator('#done-error').click();
 
   // Opening a client Activity dialog renders the newest window immediately and
   // backfills attempt details as rows scroll into view. There is no "Show

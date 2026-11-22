@@ -794,6 +794,10 @@ func TestActivityCSVExportHeaderRowAlignment(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if _, err := activityDB(t, db).Exec(`UPDATE request_logs SET response_body=?,response_body_truncated=1 WHERE id=?`, "=response body", "row-align"); err != nil {
+		t.Fatal(err)
+	}
+
 	status, body := getCSV(t, api, "/api/admin/client-keys/"+clientID+"/activity/export")
 	if status != 200 {
 		t.Fatalf("export: %d", status)
@@ -806,8 +810,8 @@ func TestActivityCSVExportHeaderRowAlignment(t *testing.T) {
 		t.Fatalf("expected header + 1 row, got %d records", len(records))
 	}
 	header := records[0]
-	if len(header) != 32 {
-		t.Fatalf("expected 32 columns, got %d", len(header))
+	if len(header) != 34 {
+		t.Fatalf("expected 34 columns, got %d", len(header))
 	}
 	for _, h := range header {
 		if h == "warning_code" {
@@ -852,6 +856,8 @@ func TestActivityCSVExportHeaderRowAlignment(t *testing.T) {
 		{"fallback_used", "false"},
 		{"fallback_reason", ""},
 		{"error_message", "boom"},
+		{"response_body", "'=response body"},
+		{"response_body_truncated", "true"},
 		{"provider_request_id", "upstream-align"},
 		{"client_request_id", "req-align"},
 		{"route_kind", "virtual"},
