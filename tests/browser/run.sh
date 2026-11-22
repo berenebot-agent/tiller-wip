@@ -82,6 +82,7 @@ phase_timing() {
 # success). The old /tmp mktemp path had external-permission issues.
 # Prune stale runs first so interrupted runs don't accumulate on disk.
 . "$repo_dir/tests/scripts/prune-test-logs.sh"
+. "$repo_dir/tests/scripts/prune-test-images.sh"
 mkdir -p tests/logs
 # When wrapped by tests/run.sh, TILLER_TEST_DIR points at the tier's folder
 # inside the unified run dir — use it directly and let the wrapper own
@@ -117,6 +118,9 @@ stop_containers() {
 
 cleanup() {
     stop_containers
+    # Bound the content-tagged test images once our containers are gone; see
+    # prune-test-images.sh (a dev-<hash> tag per source edit, ~3.7GB each).
+    run_prune_test_images || true
     # wrapper (tests/run.sh) manages the run dir lifecycle + pruning
     [ "${WRAPPED:-0}" -eq 1 ] && return 0
     rm -f "$ports_file"
@@ -147,6 +151,12 @@ export DOCKER_BUILDKIT=1
 
 . "$repo_dir/tests/scripts/build-router.sh"
 . "$repo_dir/tests/scripts/image-hashes.sh"
+
+# Reclaim images from earlier source revisions before building: each run tags
+# its images with a content hash, so an edit-and-test loop would otherwise
+# add a fresh 3.7GB browser image per run with no upper bound.
+PRUNE_KEEP="$BROWSER_IMAGE $FIXTURE_IMAGE $ROUTER_IMAGE"
+run_prune_test_images
 
 # Build the browser + fixturectl images with content-derived tags so a code
 # change always triggers a rebuild and an unchanged codebase always reuses the
