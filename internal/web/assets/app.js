@@ -244,6 +244,7 @@ const rowCache = (row) => {
 };
 const VIEWS = ['providers', 'virtual', 'clients', 'activity', 'settings'];
 const viewFromHash = () => { const raw = (location.hash.replace(/^#\/?/, '') || 'clients'); const v = raw.split('/')[0]; return v === 'models' ? 'providers' : VIEWS.includes(v) ? v : 'clients'; };
+const providerFromHash = () => { const match = location.hash.match(/^#providers\/([^/]+)$/); if (!match) return ''; try { return decodeURIComponent(match[1]); } catch { return ''; } };
 const activityTabFromHash = () => { const parts = location.hash.replace(/^#\/?/, '').split('/'); return parts[0] === 'activity' && parts[1] === 'history' ? 'history' : 'live'; };
 const settingsTabFromHash = () => { const parts = location.hash.replace(/^#\/?/, '').split('/'); return parts[0] === 'settings' && parts[1] ? parts[1] : ''; };
 
@@ -393,7 +394,7 @@ function showBootSkeleton() { const boot = $('#boot-shell'); if (boot) boot.hidd
 function setSessionHint(on) { try { if (on) localStorage.setItem(UI_SESSION_HINT, '1'); else localStorage.removeItem(UI_SESSION_HINT); } catch { /* storage unavailable */ } }
 function sessionHint() { try { return localStorage.getItem(UI_SESSION_HINT) === '1'; } catch { return false; } }
 function isPlatformRoute(path = location.pathname) { return path === '/platform' || path === '/platform/'; }
-function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && isPlatformRoute(); const setup = runtimeMode === 'local' && runtimeSetupRequired; authView(platform ? 'platform-login-form' : setup ? 'setup-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); refreshAuthOptions(); }
+function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && isPlatformRoute(); const setup = runtimeMode === 'local' && runtimeSetupRequired; authView(platform ? 'platform-login-form' : setup ? 'setup-form' : 'login-form'); const hash = platform || providerFromHash() ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${hash}` : (runtimeMode === 'hosted' ? `/login${hash}` : `/${hash}`)); liveStop(); refreshAuthOptions(); }
 // refreshAuthOptions re-reads what the login card greys in or out (passkey and
 // Google sign-in, signup, Turnstile) and repaints it. The flags it refreshes
 // come from /api/runtime and /api/auth/options, which used to be fetched once in
@@ -441,7 +442,7 @@ function renderIdentity(session) {
   identity.disabled = !hosted;
   identity.title = hosted ? 'Account settings' : '';
 }
-function showApp(session) { hideBoot(); state.csrf = session.csrf_token; setSessionHint(true); renderIdentity(session); $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { renderFooterFeedback(); refreshWizardButton(true); loadPlanSnapshot(); } else if (runtimeWizardEnabled) { refreshWizardButton(true); } }
+function showApp(session) { hideBoot(); state.csrf = session.csrf_token; setSessionHint(true); renderIdentity(session); $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; if (providerFromHash()) { history.replaceState(history.state, '', '/' + location.hash); state.view = 'providers'; } liveStart(); navigate(state.view, { fromLocation: true }); if (runtimeMode === 'hosted') { renderFooterFeedback(); refreshWizardButton(true); loadPlanSnapshot(); } else if (runtimeWizardEnabled) { refreshWizardButton(true); } }
 function showAccountDeleteConfirmation({ email, google, passkey = false }) {
   hideBoot();
   $('#app').hidden = true; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-google-link-shell').hidden = true;
@@ -850,7 +851,7 @@ async function handleGoogleCredential(response) {
     if (result?.link_required) { $('#google-link-confirm-message').textContent = `A Tiller account already exists for ${result.email}. Link this Google account to sign in to it?`; history.replaceState(null, '', '/login'); authView('google-link-confirm-form'); return; }
     if (result?.link_challenge_required) { history.replaceState(null, '', '/login'); authView('login-form'); $('#login-error').textContent = `A Tiller account already exists for ${result.email}. Sign in with your password to continue, and we will offer to link Google.`; return; }
     if (result?.signup_required) { history.replaceState(null, '', '/login?google_signup=1'); authView('google-consent-form'); return; }
-    history.replaceState(null, '', '/#clients'); showApp(result);
+    if (!providerFromHash()) history.replaceState(null, '', '/#clients'); showApp(result);
   } catch (error) { showAuthError('login-error', error, 'Google sign-in could not be completed.'); }
 }
 $('#google-consent-cancel').onclick = () => { history.replaceState(null, '', '/login'); authView('login-form'); };
@@ -962,13 +963,13 @@ window.addEventListener('popstate', () => {
 });
 $('#platform-stats-refresh').addEventListener('click', () => loadPlatformDashboard('overview').catch(error => setPlatformStatsUnavailable(errorMessage(error, 'Could not load platform statistics.'))));
 
-async function navigate(view) {
+async function navigate(view, { fromLocation = false } = {}) {
   const legacyModelsHash = location.hash === '#models';
   if (view === 'models') view = 'providers';
-  if (view !== 'providers' && drawerProviderID) closeProviderDrawer(false);
+  if ((view !== 'providers' || !fromLocation || !providerFromHash()) && drawerProviderID) closeProviderDrawer(false);
   state.view = view;
   // Preserve the settings sub-tab in the hash; only the base view is rewritten.
-  const desiredHash = view === 'settings' ? ('#settings' + (settingsTabFromHash() && settingsTabFromHash() !== 'routing' ? '/' + settingsTabFromHash() : '')) : view === 'activity' && activityTabFromHash() === 'history' ? '#activity/history' : '#' + view;
+  const desiredHash = view === 'providers' && fromLocation && providerFromHash() ? location.hash : view === 'settings' ? ('#settings' + (settingsTabFromHash() && settingsTabFromHash() !== 'routing' ? '/' + settingsTabFromHash() : '')) : view === 'activity' && activityTabFromHash() === 'history' ? '#activity/history' : '#' + view;
   if (location.hash !== desiredHash) {
     if (legacyModelsHash) history.replaceState(null, '', desiredHash);
     else history.pushState(null, '', desiredHash);
@@ -987,7 +988,7 @@ $('#admin-name').addEventListener('click', () => {
   if (location.hash !== '#settings/account') history.pushState(null, '', '#settings/account');
   navigate('settings');
 });
-window.addEventListener('popstate', () => { if (!isPlatformRoute()) navigate(viewFromHash()); });
+window.addEventListener('popstate', () => { if (!isPlatformRoute() && !$('#app').hidden) navigate(viewFromHash(), { fromLocation: true }); });
 $$('[data-refresh-view]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.refreshView)));
 $$('[data-filter-toggle]').forEach(button => button.addEventListener('click', () => {
   const bar = button.closest('[data-filter-bar]');
@@ -1004,7 +1005,7 @@ function filterInput(selector, callback) { $(selector).addEventListener('input',
 filterInput('#provider-search', value => { providerSearchValue = value; loadProviders(value); }); filterInput('#virtual-search', loadVirtual); filterInput('#client-search', loadClients);
 $('#show-retired').addEventListener('change', event => { $('#drawer-show-retired').checked = event.target.checked; renderModels(); });
 $('#drawer-show-retired').addEventListener('change', event => { $('#show-retired').checked = event.target.checked; renderModels(); });
-$('#provider-drawer-close').addEventListener('click', closeProviderDrawer);
+$('#provider-drawer-close').addEventListener('click', () => { if (history.state?.providerDetail) history.back(); else { history.replaceState(null, '', '#providers'); closeProviderDrawer(); } });
 $('#drawer-refresh').addEventListener('click', async () => { if (drawerProviderID) await refreshProvider(drawerProviderID); });
 $('#drawer-edit').addEventListener('click', () => { const provider = state.providers.find(item => item.id === drawerProviderID); if (provider) openProvider(provider); });
 $('#drawer-delete').addEventListener('click', async () => { if (drawerProviderID) await deleteProvider(drawerProviderID); });
@@ -1016,6 +1017,16 @@ async function loadProviders(search = $('#provider-search').value) {
   if (token !== state.loadToken) return;
   const term = (search || '').trim().toLowerCase();
   state.providers = result.data; state.providerTypes = types.data; state.models = models.data;
+  const requestedProvider = state.view === 'providers' ? providerFromHash() : '';
+  if (requestedProvider && !state.providers.some(provider => provider.id === requestedProvider)) {
+    for (let offset = 0; ; offset += 200) {
+      const page = await api(`/api/admin/providers?limit=200&offset=${offset}`);
+      if (token !== state.loadToken || providerFromHash() !== requestedProvider) return;
+      const provider = page.data.find(item => item.id === requestedProvider);
+      if (provider) { state.providers.push(provider); break; }
+      if (page.data.length < 200) break;
+    }
+  }
   renderModels();
   const matchingProviders = term ? [...new Map([
     ...result.data.filter(provider => provider.name.toLowerCase().includes(term) || typeLabel(provider.type).toLowerCase().includes(term)).map(provider => [provider.id, provider]),
@@ -1024,7 +1035,9 @@ async function loadProviders(search = $('#provider-search').value) {
   renderProviders(matchingProviders);
   loadQuota();
   deferUsage();
-  if (drawerProviderID && !state.providers.some(provider => provider.id === drawerProviderID)) closeProviderDrawer();
+  if (requestedProvider && !state.providers.some(provider => provider.id === requestedProvider)) { history.replaceState(null, '', '#providers'); if (drawerProviderID) closeProviderDrawer(); flash('Provider not found.', 'error'); }
+  else if (requestedProvider && drawerProviderID !== requestedProvider) openProviderDrawer(requestedProvider, false);
+  else if (drawerProviderID && !state.providers.some(provider => provider.id === drawerProviderID)) closeProviderDrawer();
   else if (drawerProviderID) {
     const provider = state.providers.find(item => item.id === drawerProviderID);
     $('#provider-drawer-title').textContent = provider.name;
@@ -1323,11 +1336,13 @@ function openManualModel(preferredProviderID = '') {
 }
 $('#add-real-model').onclick = () => openManualModel(drawerProviderID);
 async function loadModels(search = $('#model-search').value) { drawerModelSearch = (search || '').trim().toLowerCase(); const provider = state.providers.find(item => item.id === drawerProviderID); if (provider) $('#provider-drawer-meta').textContent = `${provider.available_model_count} available · ${provider.model_count - provider.available_model_count} retired · Refreshed ${date(provider.last_refresh_at)}`; renderModels(); deferUsage(); }
-function openProviderDrawer(id) {
-  drawerProviderID = id;
+function openProviderDrawer(id, push = true) {
   drawerModelSearch = '';
   const provider = state.providers.find(item => item.id === id);
   if (!provider) return;
+  drawerProviderID = id;
+  const hash = `#providers/${encodeURIComponent(id)}`;
+  if (push && location.hash !== hash) history.pushState({ providerDetail: true }, '', hash);
   $('#provider-drawer-title').textContent = provider.name;
   $('#provider-drawer-meta').textContent = `${provider.available_model_count} available · ${provider.model_count - provider.available_model_count} retired · Refreshed ${date(provider.last_refresh_at)}`;
   $('#add-real-model').disabled = !provider.enabled;
@@ -4311,8 +4326,8 @@ $$('dialog').forEach(dialog => dialog.addEventListener('close', () => {
 
 // Reconcile on view navigation so a freshly-rendered view reflects current state.
 const liveNavigate = navigate;
-navigate = function (view) {
-  liveNavigate(view);
+navigate = function (view, options) {
+  liveNavigate(view, options);
     if (liveViewActive('providers', 'virtual', 'clients')) reconcileLive();
   if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
     try { noteActivityCatalogueMiss(activityGraphModule.onSnapshotSeed({ inflight_client_routes: state.liveRoutes, inflight_targets: state.liveLegs })); } catch { /* pane update is best-effort */ }
