@@ -12,7 +12,6 @@
 .live-model-target{display:flex;align-items:stretch;gap:6px;min-width:220px}
 .live-model-box.activity-attempt{flex:1;min-width:0;grid-template-columns:minmax(0,1fr) auto}
 .live-model-target .live-fallback{flex:none;width:auto;min-height:0;margin:0;padding:3px 5px;border-radius:var(--r);white-space:nowrap}
-.live-model-error{display:block;margin-top:4px}
 .live-chain-row td{background:var(--surface,#f7fafb);padding:12px 20px}
 /* New rows settle in from above and push the rest of the list down, which is
    what makes an arrival legible at a glance. Applied by live-requests.js only
