@@ -110,27 +110,27 @@ func translateRequestObserved(body []byte, from, to providers.Protocol, model st
 	return nil, false, errors.New("unsupported protocol translation")
 }
 
-// clientExplicitlyNonStreaming reports whether the client explicitly sent
-// `"stream": false`. All three client protocols (Chat Completions, Anthropic
-// Messages, Responses) use the same top-level `stream` boolean, so the read is
-// uniform; the protocol argument is kept for clarity at the call site.
+// clientWantsNonStreaming reports whether the client asked for a single JSON
+// object rather than an SSE stream. All three client protocols (Chat
+// Completions, Anthropic Messages, Responses) use the same top-level `stream`
+// boolean, so the read is uniform; the protocol argument is kept for clarity
+// at the call site.
 //
-// Only an explicit false counts. The field is deliberately NOT treated as
-// false when omitted: a request without `stream` is left on the historical
-// relay path, where a target whose native protocol is SSE (notably the Codex
-// Responses target) is allowed to stream to the client. Treating an omitted
-// field as non-streaming would break that incremental relay. A client that
-// wants a single JSON object for such a target must say `"stream": false`.
+// `stream` is optional in all three protocols and defaults to false, so an
+// omitted field means the client wants one JSON object, exactly like an
+// explicit `"stream": false`. The choice of framing is the client's alone and
+// is never decided by the target: a target whose native protocol is SSE
+// (notably the Codex Responses target) always streams upstream, and those
+// frames are aggregated into a single completion body for such a client (see
+// relayNonstreamFromSSE). Only an explicit `"stream": true` opts into
+// incremental relay.
 // The value is read from the original request body before any translation, so
 // a Codex target's forced upstream `stream:true` never changes the client's
 // framing.
-func clientExplicitlyNonStreaming(body []byte, protocol providers.Protocol) bool {
+func clientWantsNonStreaming(body []byte, protocol providers.Protocol) bool {
 	_ = protocol
 	var request map[string]any
 	if err := json.Unmarshal(body, &request); err != nil {
-		return false
-	}
-	if _, present := request["stream"]; !present {
 		return false
 	}
 	stream, _ := request["stream"].(bool)

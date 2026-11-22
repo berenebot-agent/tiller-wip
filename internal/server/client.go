@@ -711,13 +711,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	// Extract the canonical reasoning selector once from the original request.
 	// It is recomputed for each candidate against that target's capabilities.
 	canonicalSelector := extractReasoningSelector(originalBody, incoming)
-	// clientNonStreaming is true only when the client explicitly sent
+	// clientNonStreaming is true unless the client explicitly sent
+	// `"stream": true`. `stream` is optional and defaults to false, so an
+	// omitted field asks for a single JSON response just like an explicit
 	// `"stream": false`. A Codex target always streams upstream, so such a
-	// client must receive a single aggregated JSON response instead of SSE.
-	// An omitted `stream` is NOT treated as false: a target whose native
-	// protocol is SSE (notably Codex Responses) keeps its incremental relay
-	// for clients that did not explicitly opt out.
-	clientNonStreaming := clientExplicitlyNonStreaming(originalBody, incoming)
+	// client must receive one aggregated JSON body instead of SSE.
+	clientNonStreaming := clientWantsNonStreaming(originalBody, incoming)
 	start := time.Now()
 	streamed := false
 	clientTracked := false
