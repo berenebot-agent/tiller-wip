@@ -1,7 +1,9 @@
 package web
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -116,6 +118,7 @@ func HandlerWithSite(siteDir string, logger *slog.Logger) (http.Handler, error) 
 		}
 	}
 	fileServer := http.FileServer(http.FS(sub))
+	etags := embeddedAssetETags()
 	var warnMu sync.Mutex
 	warned := map[string]bool{}
 	warnShadowed := func(p string) {
@@ -173,8 +176,61 @@ func HandlerWithSite(siteDir string, logger *slog.Logger) (http.Handler, error) 
 			_, _ = w.Write(indexHTML)
 			return
 		}
+		// Embedded assets are content-addressed rather than cacheable: the ETag
+		// changes whenever the binary does, so a rebuild can never leave a
+		// browser running the previous bundle. no-store alone is not enough —
+		// Chromium still reuses a cached response that has no validator, which
+		// served a stale app.js against a newer API and only a hard reload
+		// cleared. If-None-Match is still honoured so an unchanged asset costs a
+		// 304 rather than a re-download.
+		if etag, ok := etags[strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")]; ok {
+			w.Header().Set("ETag", etag)
+			if matchesETag(r.Header.Get("If-None-Match"), etag) {
+				w.WriteHeader(http.StatusNotModified)
+				return
+			}
+		}
 		fileServer.ServeHTTP(w, r)
 	}), nil
+}
+
+// embeddedAssetETags maps each embedded asset path to a quoted strong ETag
+// derived from its bytes. The content is fixed at build time, so the digest is
+// computed once per handler rather than per request.
+func embeddedAssetETags() map[string]string {
+	sub, err := fs.Sub(files, "assets")
+	if err != nil {
+		return nil
+	}
+	etags := map[string]string{}
+	_ = fs.WalkDir(sub, ".", func(name string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() {
+			return nil
+		}
+		data, readErr := fs.ReadFile(sub, name)
+		if readErr != nil {
+			return nil
+		}
+		sum := sha256.Sum256(data)
+		etags[name] = `"` + hex.EncodeToString(sum[:16]) + `"`
+		return nil
+	})
+	return etags
+}
+
+// matchesETag reports whether an If-None-Match header lists the given ETag. A
+// literal "*" matches any current representation, per RFC 9110.
+func matchesETag(header, etag string) bool {
+	for _, candidate := range strings.Split(header, ",") {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "*" || candidate == etag {
+			return true
+		}
+		if weak, ok := strings.CutPrefix(candidate, "W/"); ok && weak == etag {
+			return true
+		}
+	}
+	return false
 }
 
 func serveCustomAsset(w http.ResponseWriter, r *http.Request, siteDir string, warnShadowed func(string)) bool {

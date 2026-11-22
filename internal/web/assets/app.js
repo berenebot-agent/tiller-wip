@@ -2627,19 +2627,113 @@ const ATTEMPT_HYDRATE_CONCURRENCY = 4;
 
 function activityNeedsAttempts(row) { return !row.attempts && !row.attemptsError && (row.attempt_rows > 1 || row.error_text || row.fallback_used); }
 
+// errorClassSummary is the short, human-facing label for a failure class. It is
+// the one-liner shown inside the red error box; the full class plus the
+// provider's own message live behind the click-through in #error-dialog. Classes
+// without an entry fall back to the raw identifier so nothing is ever hidden.
+const ERROR_CLASS_SUMMARIES = {
+  upstream_timeout: 'Upstream timed out',
+  upstream_unreachable: 'Upstream unreachable',
+  upstream_read_error: 'Upstream read failed',
+  upstream_error: 'Upstream returned an error',
+  upstream_stream_error: 'Upstream stream error',
+  upstream_stream_incomplete: 'Upstream stream incomplete',
+  upstream_stream_eof: 'Upstream stream ended early',
+  upstream_response_too_large: 'Response too large',
+  empty_response: 'Upstream returned no content',
+  model_not_found: 'Model not found',
+  model_unavailable: 'Model unavailable',
+  virtual_model_unavailable: 'Virtual model unavailable',
+  protocol_unavailable: 'Protocol not supported',
+  context_limit_exceeded: 'Context window exceeded',
+  reasoning_roundtrip_required: 'Reasoning history required',
+  unsupported_feature: 'Unsupported feature',
+  invalid_request: 'Request rejected',
+  translation_error: 'Translation failed',
+  database_error: 'Internal database error',
+  provider_credentials_locked: 'Provider credentials locked',
+  client_cancelled: 'Client cancelled',
+  client_timeout: 'Client timed out',
+  free_model_requires_keyless: 'Free model needs no key',
+  free_tier_rejected: 'Free tier rejected',
+  stream_time_limit: 'Stream time limit reached',
+  account_suspended: 'Account suspended',
+};
+function errorClassSummary(cls) {
+  if (!cls) return 'Request failed';
+  if (ERROR_CLASS_SUMMARIES[cls]) return ERROR_CLASS_SUMMARIES[cls];
+  const status = /^http_(\d{3})$/.exec(cls);
+  return status ? `HTTP ${status[1]}` : cls;
+}
+// errorRouteLabel names the target an error is attached to. A request that
+// never reached a target (model_not_found, protocol_unavailable, …) is labelled
+// with the model the client asked for, which is the name the operator recogises.
+function errorRouteLabel(provider, model, fallback) {
+  if (provider) return model ? `${provider}/${model}` : provider;
+  return fallback || 'router';
+}
+// registerErrorDetail stores a dialog payload and returns the data-error-key
+// the rendered error box carries, so every red box clicks through to details.
+function registerErrorDetail(detail) {
+  const key = ++errorDetailSeq;
+  errorDetails.set(key, detail);
+  return key;
+}
+// activityErrorBox renders a failure as the same red box the attempt rows use
+// (model name + status, click for details). Every Activity error surface goes
+// through here — a request-level failure, the mobile card footer, and a failed
+// attempt-detail load — so no error is ever shown as bare red text.
+function activityErrorBox({ route, status = 'failed', summary, detail, hover, extra = '' }) {
+  const text = summary || detail?.body || 'Request failed';
+  const title = hover ? ` title="${h(hover)}"` : '';
+  const keyAttr = detail ? ` data-error-key="${registerErrorDetail(detail)}"` : '';
+  return `<div class="activity-attempt attempt-failed activity-error-box"${keyAttr}${title}><span class="attempt-route"><code class="model-id" title="${h(route)}">${h(route)}</code><span class="attempt-error-summary">${h(text)}</span></span><span class="attempt-status">${h(status)}</span>${extra}</div>`;
+}
+// requestErrorDetail builds the click-through payload for a request-level
+// failure from the Activity row itself (its attempts were never rendered as a
+// red box, so the row is the only source of the message).
+function requestErrorDetail(row) {
+  const route = errorRouteLabel(row.resolved_provider, row.resolved_model, row.requested_model);
+  const status = row.http_status ? `HTTP ${row.http_status}` : 'failed';
+  const parts = [];
+  parts.push(`Error: ${row.error_text}${row.error_message ? ` — ${row.error_message}` : ''}`);
+  if (row.http_status) parts.push(`HTTP status: ${row.http_status}`);
+  if (row.latency_ms) parts.push(`Latency: ${row.latency_ms} ms`);
+  if (row.error_body) parts.push(`Provider error body:\n${row.error_body}${row.error_body_truncated ? '\n\n[truncated]' : ''}`);
+  if (row.request_body) parts.push(`Client request body:\n${row.request_body}${row.request_body_truncated ? '\n\n[truncated]' : ''}`);
+  if (row.client_request_id) parts.push(`Request ID: ${row.client_request_id}`);
+  return { title: `${route} · ${status}`, body: parts.join('\n\n') };
+}
+// requestErrorHTML is the red box for a failed request whose attempt rows were
+// not rendered, plus any request-level error the attempt rows cannot carry.
+// The mobile card carries this box in its footer, so its detail body never
+// repeats it — a failure is shown exactly once per card.
+function requestErrorHTML(row, kind) {
+  if (kind === 'card' || !row.error_text) return '';
+  const route = errorRouteLabel(row.resolved_provider, row.resolved_model, row.requested_model);
+  const summary = errorClassSummary(row.error_text);
+  const hover = [row.error_text, row.error_message, row.latency_ms ? `Latency: ${row.latency_ms} ms` : ''].filter(Boolean).join(' · ');
+  return `<div class="attempt-sequence">${activityErrorBox({ route, summary, detail: requestErrorDetail(row), hover })}</div>`;
+}
+
 // activityDetailHTML is the shared "Resolved" cell / card-detail body. The full
 // attempt list is rendered here once row.attempts has been backfilled, so both
-// the table and the mobile card surface stay identical.
+// the table and the mobile card surface stay identical. Every failure renders as
+// a red error box (never bare red text) with the full detail one click away.
 function activityDetailHTML(row, kind) {
   const fixedAttempt = row.resolved_provider ? { provider: row.resolved_provider, model: row.resolved_model || '', failure_class: row.error_text, latency_ms: row.latency_ms, http_status: row.http_status, error_message: row.error_message, error_body: row.error_body, error_body_truncated: row.error_body_truncated, request_body: row.request_body, request_body_truncated: row.request_body_truncated, result: row.http_status >= 200 && row.http_status < 300 ? 'success' : 'failed' } : null;
-  const resolved = row.fallback_used ? '' : fixedAttempt ? (row.attempt_rows > 1 ? '' : `<div class="attempt-sequence">${activityAttemptDetails(fixedAttempt, 0)}</div>`) : '';
-  const sequence = (row.fallback_used || !fixedAttempt || row.attempt_rows > 1) ? attemptSequence(row) : '';
-  const errorHover = [row.error_message, row.latency_ms ? `Latency: ${row.latency_ms} ms` : ''].filter(Boolean).join(' · ');
-  const error = sequence ? '' : (row.error_text ? `<span class="error-text"${errorHover ? ` title="${h(errorHover)}"` : ''}>${h(row.error_text)}</span>` : '');
-  const loadError = row.attemptsError ? `<span class="error-text activity-attempts-error">${h(row.attemptsError)}</span><button type="button" class="activity-retry" data-activity-retry="${h(row.id)}">Retry</button>` : '';
+  // A single failed attempt is already its own red box; anything else (fallback
+  // chains, pre-attempt failures) renders the attempt rows plus a request-level
+  // box so the request's own outcome is never dropped.
+  const singleAttempt = !row.fallback_used && fixedAttempt && row.attempt_rows <= 1;
+  const resolved = singleAttempt ? `<div class="attempt-sequence">${activityAttemptDetails(fixedAttempt, 0)}</div>` : '';
+  const sequence = singleAttempt ? '' : attemptSequence(row);
+  const error = singleAttempt ? '' : requestErrorHTML(row, kind);
+  const loadError = row.attemptsError ? `<div class="attempt-sequence">${activityErrorBox({ route: errorRouteLabel(row.resolved_provider, row.resolved_model, row.requested_model), status: 'details', summary: row.attemptsError, extra: `<button type="button" class="activity-retry" data-activity-retry="${h(row.id)}">Retry</button>` })}</div>` : '';
   const pending = activityNeedsAttempts(row) ? '<span class="activity-detail-pending" aria-hidden="true">…</span>' : '';
-  // The mobile card already shows error_text in its footer, so its detail body
-  // only carries the hydrated attempt sequence (plus load errors / retry).
+  // The mobile card renders its own request-level box next to this body, so the
+  // card variant carries only the hydrated attempt sequence (plus load error /
+  // retry).
   const parts = kind === 'card' ? [sequence] : [resolved, sequence, error];
   const reasoning = row.reasoning_stripped ? '<span class="activity-reasoning-warning" title="Unverifiable reasoning history was omitted during protocol translation.">Reasoning history omitted</span>' : '';
   return `${parts.join('')}${reasoning}${loadError}${pending}`;
@@ -2909,7 +3003,7 @@ document.addEventListener('keydown', event => { if (event.key !== 'Enter' && eve
   const statusClass = row.http_status >= 200 && row.http_status < 300 ? 'history-success' : 'history-failure';
   const resolved = row.resolved_provider && row.resolved_model ? `${row.resolved_provider}/${row.resolved_model}` : 'No resolved target';
   // Shared detail renderer below includes the request's accounting.
-   return `<article class="history-card" data-activity-row="${h(row.id)}"><div class="history-card-head"><span class="history-status ${statusClass}">${h(status)}</span><time>${h(date(row.created_at))}</time></div>${showClient ? `<strong class="history-client">${h(row.client_name || '')}</strong>` : ''}<div class="history-route"><code>${h(row.requested_model)}</code>${row.exposed_model && row.exposed_model !== row.requested_model ? `<small>map → ${h(row.exposed_model)}</small>` : ''}</div><div class="history-resolution"><span>Resolved</span><strong>${h(resolved)}</strong></div><div class="history-meta"><span>${h(row.protocol)}${row.streaming ? ' · stream' : ''}</span><span>${h(row.latency_ms)} ms</span><span>${row.fallback_used ? 'Fallback' : 'Direct'}</span></div><div data-activity-resolved="${h(row.id)}" data-activity-detail-kind="card">${activityCardDetail(row)}</div><div class="history-footer"><span>${activityRequestID(row)}</span>${row.error_text ? `<span class="error-text">${h(row.error_text)}</span>` : ''}</div></article>`;
+   return `<article class="history-card" data-activity-row="${h(row.id)}"><div class="history-card-head"><span class="history-status ${statusClass}">${h(status)}</span><time>${h(date(row.created_at))}</time></div>${showClient ? `<strong class="history-client">${h(row.client_name || '')}</strong>` : ''}<div class="history-route"><code>${h(row.requested_model)}</code>${row.exposed_model && row.exposed_model !== row.requested_model ? `<small>map → ${h(row.exposed_model)}</small>` : ''}</div><div class="history-resolution"><span>Resolved</span><strong>${h(resolved)}</strong></div><div class="history-meta"><span>${h(row.protocol)}${row.streaming ? ' · stream' : ''}</span><span>${h(row.latency_ms)} ms</span><span>${row.fallback_used ? 'Fallback' : 'Direct'}</span></div><div data-activity-resolved="${h(row.id)}" data-activity-detail-kind="card">${activityCardDetail(row)}</div><div class="history-footer"><span>${activityRequestID(row)}</span>${row.error_text ? `<div class="history-error">${requestErrorHTML(row, 'table')}</div>` : ''}</div></article>`;
 }
  filterInput('#activity-search', value => { activityFeed.setSearch(value); });
 $('#close-activity').onclick = $('#done-activity').onclick = () => $('#activity-dialog').close();
@@ -3903,7 +3997,7 @@ function destroyActivityView() {
 // cells; state is always kept current so a reconcile paint on close/nav is
 // instant.
 const live = new LiveStream('/api/admin/live', { onAuthFailure: () => showLogin() });
-const liveRequests = new LiveRequests($('#view-activity'), { api, h, date, when: relativeAge, requestIdentity, rowCache });
+const liveRequests = new LiveRequests($('#view-activity'), { api, h, date, when: relativeAge, requestIdentity, rowCache, errorClassSummary, errorRouteLabel, activityErrorBox });
 live.on('request', row => liveRequests.onRequest(row));
 live.on('connection', payload => liveRequests.setConnection(payload.state));
 let livePendingReconcile = false;

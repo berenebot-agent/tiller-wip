@@ -398,3 +398,64 @@ func TestHandlerServesStaticAssetsAndKeepsUnknownReservedPathsOutOfSPA(t *testin
 		})
 	}
 }
+
+// TestEmbeddedAssetsCarryContentETags locks in the cache-busting contract: an
+// embedded asset answers with an ETag derived from its bytes, revalidates to a
+// 304 for the same tag, and returns the full body for a stale tag. Without a
+// validator Chromium reuses the cached bundle after a rebuild (no-store alone
+// does not prevent that), so the admin UI could run a stale app.js against a
+// newer API.
+func TestEmbeddedAssetsCarryContentETags(t *testing.T) {
+	t.Parallel()
+	handler := Handler()
+	request := func(path, ifNoneMatch string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		if ifNoneMatch != "" {
+			req.Header.Set("If-None-Match", ifNoneMatch)
+		}
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		return res
+	}
+
+	for _, asset := range []string{"/app.js", "/style.css", "/live-requests.css"} {
+		fresh := request(asset, "")
+		if fresh.Code != http.StatusOK {
+			t.Fatalf("%s: status=%d", asset, fresh.Code)
+		}
+		etag := fresh.Header().Get("ETag")
+		if etag == "" {
+			t.Fatalf("%s: missing ETag", asset)
+		}
+		if got := fresh.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("%s: Cache-Control=%q, want no-store", asset, got)
+		}
+		revalidated := request(asset, etag)
+		if revalidated.Code != http.StatusNotModified {
+			t.Fatalf("%s: revalidation status=%d, want 304", asset, revalidated.Code)
+		}
+		if revalidated.Body.Len() != 0 {
+			t.Fatalf("%s: 304 returned a body", asset)
+		}
+		stale := request(asset, `"stale"`)
+		if stale.Code != http.StatusOK || stale.Body.Len() != fresh.Body.Len() {
+			t.Fatalf("%s: stale tag status=%d bodyLen=%d want 200/%d", asset, stale.Code, stale.Body.Len(), fresh.Body.Len())
+		}
+	}
+
+	// A weak or wildcard validator must still revalidate to 304.
+	etag := request("/app.js", "").Header().Get("ETag")
+	if got := request("/app.js", "W/"+etag).Code; got != http.StatusNotModified {
+		t.Fatalf("weak validator status=%d, want 304", got)
+	}
+	if got := request("/app.js", "*").Code; got != http.StatusNotModified {
+		t.Fatalf("wildcard validator status=%d, want 304", got)
+	}
+
+	// The SPA entry is generated HTML, not an embedded file, and is never
+	// conditionally served.
+	entry := request("/", etag)
+	if entry.Code != http.StatusOK || entry.Body.Len() == 0 {
+		t.Fatalf("entry: status=%d bodyLen=%d, want 200 with body", entry.Code, entry.Body.Len())
+	}
+}
