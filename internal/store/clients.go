@@ -77,6 +77,7 @@ type ClientKeyRow struct {
 	Enabled               bool
 	LoggingEnabled        bool
 	LogErrorBodies        string
+	LogAllBodies          string
 	RetentionDays         int
 	CreatedAt             string
 	RotatedAt             sql.NullString
@@ -103,7 +104,7 @@ type ClientKeyFilter struct {
 // ListClientKeys returns the account's client keys matching the filter.
 func (s *Scope) ListClientKeys(ctx context.Context, filter ClientKeyFilter) ([]ClientKeyRow, error) {
 	pattern := "%" + filter.Search + "%"
-	query := `SELECT c.id,c.name,c.description,c.key_group,c.secret_fingerprint,c.enabled,c.logging_enabled,c.log_error_bodies,c.retention_days,c.created_at,c.rotated_at,c.updated_at,c.key_type,
+	query := `SELECT c.id,c.name,c.description,c.key_group,c.secret_fingerprint,c.enabled,c.logging_enabled,c.log_error_bodies,c.log_all_bodies,c.retention_days,c.created_at,c.rotated_at,c.updated_at,c.key_type,
 coalesce(b.exposed_model_name,''),
 CASE WHEN b.real_model_id IS NOT NULL THEN 'real' WHEN b.virtual_model_id IS NOT NULL THEN 'virtual' ELSE '' END,
 coalesce(b.real_model_id,b.virtual_model_id,''),
@@ -130,13 +131,14 @@ WHERE (c.name LIKE ? OR c.description LIKE ? OR c.key_group LIKE ?) AND c.accoun
 	for rows.Next() {
 		var v ClientKeyRow
 		var enabled, loggingEnabled int
-		var bodyLog sql.NullBool
-		if err := rows.Scan(&v.ID, &v.Name, &v.Description, &v.Group, &v.Fingerprint, &enabled, &loggingEnabled, &bodyLog, &v.RetentionDays, &v.CreatedAt, &v.RotatedAt, &v.UpdatedAt, &v.Type, &v.SingleModelName, &v.SingleTargetType, &v.SingleTargetID, &v.SingleTargetCanonical, &v.TemplateID, &v.TemplateName); err != nil {
+		var bodyLog, allBodyLog sql.NullBool
+		if err := rows.Scan(&v.ID, &v.Name, &v.Description, &v.Group, &v.Fingerprint, &enabled, &loggingEnabled, &bodyLog, &allBodyLog, &v.RetentionDays, &v.CreatedAt, &v.RotatedAt, &v.UpdatedAt, &v.Type, &v.SingleModelName, &v.SingleTargetType, &v.SingleTargetID, &v.SingleTargetCanonical, &v.TemplateID, &v.TemplateName); err != nil {
 			return nil, err
 		}
 		v.Enabled = enabled != 0
 		v.LoggingEnabled = loggingEnabled != 0
 		v.LogErrorBodies = bodyLogMode(bodyLog)
+		v.LogAllBodies = bodyLogMode(allBodyLog)
 		out = append(out, v)
 	}
 	return out, rows.Err()
@@ -184,6 +186,7 @@ type ClientKeyEditable struct {
 	Enabled        bool
 	LoggingEnabled bool
 	LogErrorBodies string
+	LogAllBodies   string
 	RetentionDays  int
 	TemplateID     string
 }
@@ -191,9 +194,9 @@ type ClientKeyEditable struct {
 func (s *Scope) GetClientKeyEditable(ctx context.Context, id string) (ClientKeyEditable, error) {
 	var v ClientKeyEditable
 	var enabled, loggingEnabled int
-	var bodyLog sql.NullBool
-	err := s.q.QueryRowContext(ctx, `SELECT name,description,key_group,enabled,logging_enabled,log_error_bodies,retention_days,key_type,coalesce(template_id,'') FROM client_keys WHERE id=? AND account_id=?`, id, s.accountID).
-		Scan(&v.Name, &v.Description, &v.Group, &enabled, &loggingEnabled, &bodyLog, &v.RetentionDays, &v.Type, &v.TemplateID)
+	var bodyLog, allBodyLog sql.NullBool
+	err := s.q.QueryRowContext(ctx, `SELECT name,description,key_group,enabled,logging_enabled,log_error_bodies,log_all_bodies,retention_days,key_type,coalesce(template_id,'') FROM client_keys WHERE id=? AND account_id=?`, id, s.accountID).
+		Scan(&v.Name, &v.Description, &v.Group, &enabled, &loggingEnabled, &bodyLog, &allBodyLog, &v.RetentionDays, &v.Type, &v.TemplateID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ClientKeyEditable{}, ErrClientKeyNotFound
 	}
@@ -203,6 +206,7 @@ func (s *Scope) GetClientKeyEditable(ctx context.Context, id string) (ClientKeyE
 	v.Enabled = enabled != 0
 	v.LoggingEnabled = loggingEnabled != 0
 	v.LogErrorBodies = bodyLogMode(bodyLog)
+	v.LogAllBodies = bodyLogMode(allBodyLog)
 	return v, nil
 }
 
@@ -228,19 +232,19 @@ func (s *Scope) ClientKeyLoggingEnabled(ctx context.Context, id string) (bool, e
 }
 
 // ClientKeyLoggingFlags returns the client key's request-logging switch and
-// its detailed-error-body mode in one read. The body mode falls back to
-// "never" on error, so a failed read can never widen what is captured.
-func (s *Scope) ClientKeyLoggingFlags(ctx context.Context, id string) (bool, string, error) {
+// its body logging modes in one read. Both modes fall back to "never" on
+// error, so a failed read can never widen what is captured.
+func (s *Scope) ClientKeyLoggingFlags(ctx context.Context, id string) (bool, string, string, error) {
 	var enabled int
-	var bodyLog sql.NullBool
-	err := s.q.QueryRowContext(ctx, `SELECT logging_enabled,log_error_bodies FROM client_keys WHERE id=? AND account_id=?`, id, s.accountID).Scan(&enabled, &bodyLog)
+	var bodyLog, allBodyLog sql.NullBool
+	err := s.q.QueryRowContext(ctx, `SELECT logging_enabled,log_error_bodies,log_all_bodies FROM client_keys WHERE id=? AND account_id=?`, id, s.accountID).Scan(&enabled, &bodyLog, &allBodyLog)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, BodyLogNever, ErrClientKeyNotFound
+		return false, BodyLogNever, BodyLogNever, ErrClientKeyNotFound
 	}
 	if err != nil {
-		return false, BodyLogNever, err
+		return false, BodyLogNever, BodyLogNever, err
 	}
-	return enabled != 0, bodyLogMode(bodyLog), nil
+	return enabled != 0, bodyLogMode(bodyLog), bodyLogMode(allBodyLog), nil
 }
 
 // ClientKeyName returns a client key's name, used for delete notifications.
@@ -413,6 +417,7 @@ type UpdateClientKeyInput struct {
 	// LogErrorBodies is the client key's detailed-error-body mode
 	// (inherit/always/never). An empty string leaves the mode untouched.
 	LogErrorBodies string
+	LogAllBodies   string
 	Retention      int
 	RetentionSet   bool
 	// BindingSet reports whether the request supplied Single-binding fields. The
@@ -463,6 +468,10 @@ func (s *Scope) UpdateClientKey(ctx context.Context, in UpdateClientKeyInput) er
 		if in.LogErrorBodies != "" {
 			set += ",log_error_bodies=?"
 			args = append(args, bodyLogValue(in.LogErrorBodies))
+		}
+		if in.LogAllBodies != "" {
+			set += ",log_all_bodies=?"
+			args = append(args, bodyLogValue(in.LogAllBodies))
 		}
 		if in.RetentionSet {
 			set += ",retention_days=?"

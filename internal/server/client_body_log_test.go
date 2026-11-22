@@ -298,3 +298,107 @@ func TestHostedClientBodyLoggingIsOptIn(t *testing.T) {
 		t.Fatalf("hosted client set to always did not persist the provider error body: %v", errorBody)
 	}
 }
+
+func TestAllBodyLogging(t *testing.T) {
+	api, db, clientID, secret := loggingTestHarness(t, mockUpstream(t))
+	setAccount := func(enabled bool) {
+		t.Helper()
+		status, body, _ := api.request("PUT", "/api/admin/settings", map[string]any{"log_all_bodies": enabled})
+		if status != http.StatusNoContent {
+			t.Fatalf("update settings: %d %v", status, body)
+		}
+	}
+	setClient := func(mode string) {
+		t.Helper()
+		status, body, _ := api.request("PATCH", "/api/admin/client-keys/"+clientID, map[string]any{"log_all_bodies": mode})
+		if status != http.StatusNoContent {
+			t.Fatalf("update client: %d %v", status, body)
+		}
+	}
+	check := func(stream, want bool) {
+		t.Helper()
+		payload, err := json.Marshal(map[string]any{"model": "provider-a/model-a", "stream": stream, "messages": []any{map[string]any{"role": "user", "content": "request-marker"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, err := http.NewRequest("POST", api.base+"/v1/chat/completions", strings.NewReader(string(payload)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+secret)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil || resp.StatusCode != 200 {
+			t.Fatalf("client response: status %d, error %v", resp.StatusCode, err)
+		}
+		var requestBody, responseBody *string
+		if err := activityDB(t, db).QueryRow(`SELECT request_body,response_body FROM request_logs WHERE client_key_id=? ORDER BY created_at DESC LIMIT 1`, clientID).Scan(&requestBody, &responseBody); err != nil {
+			t.Fatal(err)
+		}
+		if !want {
+			if requestBody != nil || responseBody != nil {
+				t.Fatal("body recorded without opt-in")
+			}
+			return
+		}
+		if requestBody == nil || !strings.Contains(*requestBody, "request-marker") || responseBody == nil || *responseBody != string(body) {
+			t.Fatal("stored request or client-visible response did not match")
+		}
+	}
+	check(false, false)
+	setAccount(true)
+	check(false, true)
+	check(true, true)
+	setClient("never")
+	check(false, false)
+	setAccount(false)
+	setClient("always")
+	check(false, true)
+	setClient("inherit")
+	check(false, false)
+}
+
+func TestBodyCaptureWriterLimit(t *testing.T) {
+	out := httptest.NewRecorder()
+	writer := &bodyCaptureWriter{ResponseWriter: out}
+	data := strings.Repeat("x", maxLoggedBodyBytes+1)
+	if n, err := io.WriteString(writer, data); err != nil || n != len(data) {
+		t.Fatalf("write: %d %v", n, err)
+	}
+	body, truncated := writer.snapshot()
+	if body == nil || len(*body) != maxLoggedBodyBytes || !truncated || out.Body.Len() != len(data) {
+		t.Fatal("capture limit changed response or failed to truncate")
+	}
+}
+
+func TestHostedAllBodyLoggingOptIn(t *testing.T) {
+	api, db, clientID, secret := hostedBodyLogHarness(t)
+	status, settings, _ := api.request("GET", "/api/admin/settings", nil)
+	if status != 200 || settings["log_all_bodies"] != false {
+		t.Fatal("hosted body logging must default off")
+	}
+	failRequest(t, api, secret)
+	var requestBody, responseBody *string
+	if err := activityDB(t, db).QueryRow(`SELECT request_body,response_body FROM request_logs WHERE client_key_id=? ORDER BY created_at DESC LIMIT 1`, clientID).Scan(&requestBody, &responseBody); err != nil {
+		t.Fatal(err)
+	}
+	if requestBody != nil || responseBody != nil {
+		t.Fatal("hosted captured bodies without opt-in")
+	}
+	status, settings, _ = api.request("PUT", "/api/admin/settings", map[string]any{"log_all_bodies": true})
+	if status != 204 {
+		t.Fatalf("enable hosted logging: %d %v", status, settings)
+	}
+	failRequest(t, api, secret)
+	if err := activityDB(t, db).QueryRow(`SELECT request_body,response_body FROM request_logs WHERE client_key_id=? ORDER BY created_at DESC LIMIT 1`, clientID).Scan(&requestBody, &responseBody); err != nil {
+		t.Fatal(err)
+	}
+	if requestBody == nil || responseBody == nil {
+		t.Fatal("hosted opt-in did not capture bodies")
+	}
+}

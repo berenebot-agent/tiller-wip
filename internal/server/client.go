@@ -680,8 +680,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		clientRequestID: newRequestID(),
 		createdAt:       database.Now(),
 	}
-	var clientBodyLog string
-	row.liveEnabled, clientBodyLog, _ = s.scope(r).ClientKeyLoggingFlags(r.Context(), identity.ID)
+	var clientBodyLog, clientAllBodyLog string
+	row.liveEnabled, clientBodyLog, clientAllBodyLog, _ = s.scope(r).ClientKeyLoggingFlags(r.Context(), identity.ID)
 	s.publishLiveRequest(row, false)
 	// Detailed error bodies are captured only when the client key allows it:
 	// "always" captures them regardless of the account setting, "inherit"
@@ -694,6 +694,18 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		logErrorBodies = true
 	case store.BodyLogInherit:
 		logErrorBodies, _ = s.scope(r).GetLogErrorBodies(r.Context())
+	}
+	logAllBodies := false
+	switch clientAllBodyLog {
+	case store.BodyLogAlways:
+		logAllBodies = true
+	case store.BodyLogInherit:
+		logAllBodies, _ = s.scope(r).GetLogAllBodies(r.Context())
+	}
+	var capturedResponse *bodyCaptureWriter
+	if logAllBodies && row.liveEnabled {
+		capturedResponse = &bodyCaptureWriter{ResponseWriter: w}
+		w = capturedResponse
 	}
 	originalBody := append([]byte(nil), body...)
 	// Extract the canonical reasoning selector once from the original request.
@@ -720,8 +732,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	var route resolvedRoute
 	defer func() {
 		row.latencyMs = time.Since(start).Milliseconds()
-		if logErrorBodies && row.httpStatus >= 400 {
+		if logAllBodies || (logErrorBodies && row.httpStatus >= 400) {
 			row.requestBody, row.requestBodyTruncated = loggedBody(originalBody)
+		}
+		if capturedResponse != nil {
+			row.responseBody, row.responseBodyTruncated = capturedResponse.snapshot()
 		}
 		// Single-ticket liveness: the client ticket (started below) is the
 		// only request-presence signal; route presence is derived from it.

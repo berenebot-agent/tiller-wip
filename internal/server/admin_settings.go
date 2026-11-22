@@ -25,6 +25,11 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not load settings.")
 		return
 	}
+	logAllBodies, err := sc.GetLogAllBodies(r.Context())
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not load settings.")
+		return
+	}
 	fallbackTimeout, err := sc.GetFallbackTimeout(r.Context())
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load settings.")
@@ -44,6 +49,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		"default_logging_enabled":                enabled,
 		"default_retention_days":                 retention,
 		"log_error_bodies":                       logErrorBodies,
+		"log_all_bodies":                         logAllBodies,
 		"fallback_timeout_seconds":               fallbackTimeout,
 		"fallback_cooldown_seconds":              fallbackCooldown,
 		"notifications_enabled":                  notifications.Enabled,
@@ -63,6 +69,7 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		DefaultLoggingEnabled              *bool   `json:"default_logging_enabled"`
 		DefaultRetentionDays               *int    `json:"default_retention_days"`
 		LogErrorBodies                     *bool   `json:"log_error_bodies"`
+		LogAllBodies                       *bool   `json:"log_all_bodies"`
 		FallbackTimeoutSeconds             *int    `json:"fallback_timeout_seconds"`
 		FallbackCooldownSeconds            *int    `json:"fallback_cooldown_seconds"`
 		NotificationsEnabled               *bool   `json:"notifications_enabled"`
@@ -158,6 +165,7 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		{key: store.SettingDefaultLoggingEnabled, value: input.DefaultLoggingEnabled},
 		{key: store.SettingDefaultRetentionDays, value: input.DefaultRetentionDays},
 		{key: store.SettingLogErrorBodies, value: input.LogErrorBodies},
+		{key: store.SettingLogAllBodies, value: input.LogAllBodies},
 		{key: store.SettingFallbackTimeoutSeconds, value: input.FallbackTimeoutSeconds},
 		{key: store.SettingFallbackCooldownSeconds, value: input.FallbackCooldownSeconds},
 		{key: store.SettingNotificationsEnabled, value: input.NotificationsEnabled},

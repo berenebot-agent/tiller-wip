@@ -40,29 +40,31 @@ type logRow struct {
 	providerType *string
 	// providerCostMicros is a provider-reported exact cost (OpenRouter
 	// usage.cost) when the upstream response carried one.
-	providerCostMicros   *int64
-	estimatedCostMicros  *int64
-	inputTokensSource    *string
-	outputTokensSource   *string
-	inputEstimate        int64
-	providerRequestID    *string
-	clientRequestID      string
-	errorText            *string
-	errorMessage         *string
-	fallbackUsed         bool
-	reasoningStripped    bool
-	fallbackReason       *string
-	attempts             []requestAttempt
-	routeStatus          string
-	requestBody          *string
-	requestBodyTruncated bool
-	errorBody            *string
-	errorBodyTruncated   bool
-	createdAt            string
-	liveEnabled          bool
-	liveRevision         uint64
-	liveAttempt          *requestAttempt
-	liveFallback         bool
+	providerCostMicros    *int64
+	estimatedCostMicros   *int64
+	inputTokensSource     *string
+	outputTokensSource    *string
+	inputEstimate         int64
+	providerRequestID     *string
+	clientRequestID       string
+	errorText             *string
+	errorMessage          *string
+	fallbackUsed          bool
+	reasoningStripped     bool
+	fallbackReason        *string
+	attempts              []requestAttempt
+	routeStatus           string
+	requestBody           *string
+	requestBodyTruncated  bool
+	responseBody          *string
+	responseBodyTruncated bool
+	errorBody             *string
+	errorBodyTruncated    bool
+	createdAt             string
+	liveEnabled           bool
+	liveRevision          uint64
+	liveAttempt           *requestAttempt
+	liveFallback          bool
 }
 
 // copyUsage moves the captured token counts and any provider-reported cost from
@@ -273,6 +275,8 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 		ErrorMessage:             row.errorMessage,
 		RequestBody:              row.requestBody,
 		RequestBodyTruncated:     row.requestBodyTruncated,
+		ResponseBody:             row.responseBody,
+		ResponseBodyTruncated:    row.responseBodyTruncated,
 		ErrorBody:                row.errorBody,
 		ErrorBodyTruncated:       row.errorBodyTruncated,
 		ReasoningStripped:        row.reasoningStripped,

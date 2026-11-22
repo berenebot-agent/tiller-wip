@@ -85,6 +85,8 @@ type activityView struct {
 	ErrorMessage             *string `json:"error_message"`
 	RequestBody              *string `json:"request_body"`
 	RequestBodyTruncated     bool    `json:"request_body_truncated"`
+	ResponseBody             *string `json:"response_body"`
+	ResponseBodyTruncated    bool    `json:"response_body_truncated"`
 	ErrorBody                *string `json:"error_body"`
 	ErrorBodyTruncated       bool    `json:"error_body_truncated"`
 	AttemptCount             int     `json:"attempt_count"`
@@ -123,6 +125,8 @@ func activityViewFromStore(row store.ActivityRow) activityView {
 		ErrorMessage:             row.ErrorMessage,
 		RequestBody:              row.RequestBody,
 		RequestBodyTruncated:     row.RequestBodyTruncated,
+		ResponseBody:             row.ResponseBody,
+		ResponseBodyTruncated:    row.ResponseBodyTruncated,
 		ErrorBody:                row.ErrorBody,
 		ErrorBodyTruncated:       row.ErrorBodyTruncated,
 		AttemptCount:             row.AttemptCount,
@@ -333,7 +337,7 @@ func (s *Server) writeActivityCSV(w http.ResponseWriter, r *http.Request, filena
 		"timestamp", "client_key", "client_requested_model", "client_exposed_model",
 		"virtual_model", "bound_target", "final_provider", "final_model", "protocol",
 		"streaming", "http_status", "latency_ms", "input_tokens", "output_tokens",
-		"cached_input_tokens", "cache_creation_input_tokens", "attempt_count", "fallback_used", "fallback_reason", "error_message", "request_body", "request_body_truncated", "error_body", "error_body_truncated",
+		"cached_input_tokens", "cache_creation_input_tokens", "attempt_count", "fallback_used", "fallback_reason", "error_message", "request_body", "request_body_truncated", "response_body", "response_body_truncated", "error_body", "error_body_truncated",
 		"provider_request_id", "client_request_id", "route_kind",
 		"estimated_cost_micros", "provider_cost_micros", "input_tokens_source", "output_tokens_source", "reasoning_stripped",
 	}); err != nil {
@@ -355,6 +359,7 @@ func (s *Server) writeActivityCSV(w http.ResponseWriter, r *http.Request, filena
 			int64PtrOrEmpty(row.CacheCreationInputTokens), strconv.Itoa(row.AttemptCount), strconv.FormatBool(row.FallbackUsed),
 			strPtrOrEmpty(row.FallbackReason), neutralizeCSVField(strPtrOrEmpty(row.ErrorMessage)),
 			neutralizeCSVField(strPtrOrEmpty(row.RequestBody)), strconv.FormatBool(row.RequestBodyTruncated),
+			neutralizeCSVField(strPtrOrEmpty(row.ResponseBody)), strconv.FormatBool(row.ResponseBodyTruncated),
 			neutralizeCSVField(strPtrOrEmpty(row.ErrorBody)), strconv.FormatBool(row.ErrorBodyTruncated),
 			neutralizeCSVField(strPtrOrEmpty(row.ProviderRequestID)), row.ClientRequestID, strPtrOrEmpty(row.RouteKind),
 			int64PtrOrEmpty(row.EstimatedCostMicros), int64PtrOrEmpty(row.ProviderCostMicros), strPtrOrEmpty(row.InputTokensSource), strPtrOrEmpty(row.OutputTokensSource), strconv.FormatBool(row.ReasoningStripped),
