@@ -315,11 +315,11 @@ func (s *Scope) exportActivity(ctx context.Context, where string, args []any, rn
 		batchArgs = append(batchArgs, activityExportBatchSize)
 		var page []ActivityRow
 		err := s.withActivity(ctx, func(q querier) error {
-			rows, err := q.QueryContext(ctx, `SELECT `+activityColumns+`,rl.client_name FROM request_logs rl WHERE rl.account_id=? AND `+batchWhere+` ORDER BY rl.created_at DESC, rl.id DESC LIMIT ?`, append([]any{s.accountID}, batchArgs...)...)
+			rows, err := q.QueryContext(ctx, `SELECT `+activityListColumns+`,rl.client_name FROM request_logs rl WHERE rl.account_id=? AND `+batchWhere+` ORDER BY rl.created_at DESC, rl.id DESC LIMIT ?`, append([]any{s.accountID}, batchArgs...)...)
 			if err != nil {
 				return err
 			}
-			page, err = s.scanActivityRows(rows, false, false, true)
+			page, err = s.scanActivityRows(rows, true, false, true)
 			return err
 		})
 		if err != nil {
@@ -328,8 +328,24 @@ func (s *Scope) exportActivity(ctx context.Context, where string, args []any, rn
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		for i := range page {
-			if err := fn(page[i]); err != nil {
+		for _, row := range page {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			// Keep bodies out of the page and release the connection before writing CSV.
+			if row.HasRequestBody || row.HasResponseBody || row.HasErrorBody {
+				bodies, err := s.ActivityBodies(ctx, row.ID)
+				if errors.Is(err, sql.ErrNoRows) {
+					continue // Activity was cleared or pruned after the page read.
+				}
+				if err != nil {
+					return err
+				}
+				row.RequestBody = bodies.RequestBody
+				row.ResponseBody = bodies.ResponseBody
+				row.ErrorBody = bodies.ErrorBody
+			}
+			if err := fn(row); err != nil {
 				return err
 			}
 		}

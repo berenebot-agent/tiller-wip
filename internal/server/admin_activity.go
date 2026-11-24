@@ -339,9 +339,8 @@ func (s *Server) exportGlobalActivityCSV(w http.ResponseWriter, r *http.Request)
 	}
 }
 
-// writeActivityCSV streams the export rows as a UTF-8 CSV attachment. Only
-// metadata is written; unknown values stay blank. A BOM is prepended so Excel
-// detects UTF-8 correctly.
+// writeActivityCSV streams metadata and any captured bodies as a UTF-8 CSV
+// attachment. Unknown values stay blank. A BOM helps Excel detect UTF-8.
 func (s *Server) writeActivityCSV(w http.ResponseWriter, r *http.Request, filename string, run func(fn func(store.ActivityRow) error) error) error {
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))

@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -123,6 +124,68 @@ func TestActivityIsAccountScoped(t *testing.T) {
 	}
 	if len(globalOther) != 1 {
 		t.Fatalf("other account rows changed after the local account clear: %d", len(globalOther))
+	}
+}
+
+func TestActivityExportLoadsBodiesOneRowAtATime(t *testing.T) {
+	t.Parallel()
+	db, st := openActivityStore(t)
+	ctx := context.Background()
+	scope := st.For(database.LocalAccountID)
+	const newest = 257
+	const cleared = 2 // Last row of the first 256-row page.
+	body := "captured response"
+	created := database.Now()
+	for i := range newest + 1 {
+		row := store.RequestLogInsert{
+			ID:             fmt.Sprintf("%03d", i),
+			ClientKeyID:    "kept",
+			RequestedModel: "model",
+			Protocol:       "chat",
+			HTTPStatus:     200,
+			CreatedAt:      created,
+		}
+		if i%2 == 0 {
+			row.ResponseBody = &body
+			row.ResponseBodyTruncated = true
+		}
+		if i == cleared {
+			row.ClientKeyID = "cleared"
+		}
+		if err := scope.InsertRequestLog(ctx, row); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	next := newest
+	err := scope.ExportGlobalActivity(ctx, "", store.ActivityExportRange{}, func(row store.ActivityRow) error {
+		if inUse := db.Activity.Stats().InUse; inUse != 0 {
+			t.Fatalf("CSV callback holds %d Activity connections", inUse)
+		}
+		if next == cleared {
+			next--
+		}
+		if want := fmt.Sprintf("%03d", next); row.ID != want {
+			t.Fatalf("export row ID = %q, want %q", row.ID, want)
+		}
+		if next%2 == 0 {
+			if row.ResponseBody == nil || *row.ResponseBody != body || !row.ResponseBodyTruncated {
+				t.Fatalf("export row %s lost its captured response or truncation flag", row.ID)
+			}
+		} else if row.ResponseBody != nil || row.ResponseBodyTruncated {
+			t.Fatalf("export row %s unexpectedly has a captured response", row.ID)
+		}
+		next--
+		if next == newest-1 {
+			return scope.ClearClientActivity(ctx, "cleared")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next != -1 {
+		t.Fatalf("export ended before row %03d", next)
 	}
 }
 
