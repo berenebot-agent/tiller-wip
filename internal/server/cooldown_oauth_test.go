@@ -45,8 +45,9 @@ func oauthVirtualHarness(t *testing.T, failures int) (*testAPI, string, string, 
 			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": "token expired"}})
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": "resp-1", "object": "response", "model": "gpt-5.6-sol", "output_text": "ok"})
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n" +
+			"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"object\":\"response\",\"model\":\"gpt-5.6-sol\",\"output\":[]}}\n\n"))
 	}))
 	t.Cleanup(upstream.Close)
 

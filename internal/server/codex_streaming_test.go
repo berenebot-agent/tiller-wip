@@ -183,7 +183,7 @@ func TestCodexHeaderlessSSEStreamsIncrementally(t *testing.T) {
 		t.Fatalf("permissions: %d %v", status, payload)
 	}
 
-	body, _ := json.Marshal(map[string]any{"model": "codex-mock/gpt-5.6-sol", "input": "hello"})
+	body, _ := json.Marshal(map[string]any{"model": "codex-mock/gpt-5.6-sol", "input": "hello", "stream": true})
 	req, _ := http.NewRequest(http.MethodPost, router.URL+"/v1/responses", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+clientSecret)
 	req.Header.Set("Content-Type", "application/json")

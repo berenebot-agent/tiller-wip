@@ -652,8 +652,22 @@ func TestRequestLoggingCapturesBodiesWhenEnabled(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("activity: %d", status)
 	}
-	if !strings.Contains(string(mustJSON(t, activity)), errorMarker) {
-		t.Fatal("persisted error body missing from activity when enabled")
+	var activityPayload map[string]any
+	if err := json.Unmarshal(mustJSON(t, activity), &activityPayload); err != nil {
+		t.Fatal(err)
+	}
+	rows, ok := activityPayload["data"].([]any)
+	if !ok || len(rows) == 0 {
+		t.Fatal("activity did not include the logged request")
+	}
+	requestID, _ := rows[0].(map[string]any)["id"].(string)
+	if requestID == "" {
+		t.Fatal("activity request did not include an id")
+	}
+	status, bodies, _ := api.request("GET", "/api/admin/activity/"+requestID+"/bodies", nil)
+	detailedErrorBody, _ := bodies["error_body"].(string)
+	if status != http.StatusOK || !strings.Contains(detailedErrorBody, errorMarker) {
+		t.Fatalf("activity bodies = %d %v, want persisted error body", status, bodies)
 	}
 	// Over-bound failure: body truncated with the truncated flag set.
 	resp, _ = clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "TRIGGER-BIG-BODY"}}})

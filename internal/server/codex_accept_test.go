@@ -140,7 +140,7 @@ func TestCodexUpstreamUsesExactSSEAccept(t *testing.T) {
 		t.Fatalf("permissions: %d %v", status, payload)
 	}
 
-	encoded, _ := json.Marshal(map[string]any{"model": "codex-mock/gpt-5.6-sol", "input": "hello", "reasoning": map[string]any{"effort": "xhigh"}})
+	encoded, _ := json.Marshal(map[string]any{"model": "codex-mock/gpt-5.6-sol", "input": "hello", "stream": true, "reasoning": map[string]any{"effort": "xhigh"}})
 	request, _ := http.NewRequest("POST", api.base+"/v1/responses", bytes.NewReader(encoded))
 	request.Header.Set("Authorization", "Bearer "+clientSecret)
 	request.Header.Set("Content-Type", "application/json")
