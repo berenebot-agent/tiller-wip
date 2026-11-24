@@ -12,9 +12,13 @@
 #
 # run_prune_test_images keeps the newest KEEP_IMAGES images of each
 # tiller-router* repo and removes the older dev-* ones. It is safe to call
-# while other runs are in flight:
+# while other runs are in flight. Each eligible ref is removed by name, without
+# force, so Docker untags only that ref and deletes the image only when nothing
+# else references it:
 #   - images named in $PRUNE_KEEP            are never removed
-#   - images backing ANY container           are never removed (docker ps -a)
+#   - images backing ANY container           are never removed (docker ps -a;
+#                                              Docker also refuses without -f)
+#   - image IDs shared with a protected ref  are never removed
 #   - images younger than KEEP_MINUTES       are never removed
 #
 # Env:
@@ -44,38 +48,47 @@ run_prune_test_images() {
     command -v docker >/dev/null 2>&1 || return 0
     docker info >/dev/null 2>&1 || return 0   # daemon down: nothing to do
 
-    local now inuse rows repo tag id created ref age idx removed=0
+    local now inuse rows repo tag id created ref age output verb removed=0
     now=$(date +%s)
     inuse=$(_test_images_in_use)
 
     # repo|tag|id|created_at, grouped by repo newest-first
     rows=$(docker images --format '{{.Repository}}|{{.Tag}}|{{.ID}}|{{.CreatedAt}}' 2>/dev/null \
         | awk -F'|' -v r="$TEST_IMAGE_REPO_GLOB" -v t="$TEST_IMAGE_TAG_GLOB" \
-            'NF == 4 && $1 ~ r && $2 ~ t' \
+            -v keep=" $PRUNE_KEEP " \
+            'NF == 4 && (($1 ~ r && $2 ~ t) || index(keep, " " $1 ":" $2 " "))' \
         | sort -t'|' -k1,1 -k4,4r)
 
-    local seen; declare -A seen
+    # Collect protected IDs before removing any aliases.
+    local -A protected=() seen=()
     while IFS='|' read -r repo tag id created; do
         [ -n "${repo:-}" ] || continue
-        ref="$repo:$tag"
+        case " $PRUNE_KEEP " in *" $repo:$tag "*) protected[$id]=1 ;; esac
+        [[ $repo =~ $TEST_IMAGE_REPO_GLOB && $tag =~ $TEST_IMAGE_TAG_GLOB ]] || continue
         seen[$repo]=$(( ${seen[$repo]:-0} + 1 ))
-        idx=${seen[$repo]}
+        if [ "${seen[$repo]}" -le "$KEEP_IMAGES" ]; then protected[$id]=1; fi
+    done <<< "$rows"
 
-        # newest KEEP_IMAGES of each repo stay
-        [ "$idx" -le "$KEEP_IMAGES" ] && continue
-        # caller's current images stay
-        case " $PRUNE_KEEP " in *" $ref "*) continue ;; esac
+    while IFS='|' read -r repo tag id created; do
+        [ -n "${repo:-}" ] || continue
+        [ "${protected[$id]:-0}" -eq 1 ] && continue
+        ref="$repo:$tag"
         # images behind a container (ours, or a concurrent run's) stay
         case " $inuse " in *" $id "*) continue ;; esac
         # a parallel runner's freshly built image stays
-        age=$(( now - $(date -d "$created" +%s 2>/dev/null || echo "$now") ))
+        # docker prints "2026-11-24 19:00:00 +0000 UTC"; GNU date rejects the
+        # trailing zone name after a numeric offset, which silently made every
+        # image look brand new.
+        age=$(( now - $(date -d "${created% [A-Z]*}" +%s 2>/dev/null || echo "$now") ))
         [ "$age" -lt $(( KEEP_MINUTES * 60 )) ] && continue
 
         if [ "${PRUNE_DRY_RUN:-0}" = "1" ]; then
             echo "[prune-images] would remove $ref ($id)"
             removed=$((removed + 1))
-        elif docker image rm -f "$id" >/dev/null 2>&1; then
-            echo "[prune-images] removed $ref ($id)"
+        elif output=$(docker image rm "$ref" 2>/dev/null); then
+            verb=untagged
+            if [[ $output == *"Deleted: "* ]]; then verb=removed; fi
+            echo "[prune-images] $verb $ref ($id)"
             removed=$((removed + 1))
         fi
     done <<< "$rows"
@@ -83,7 +96,7 @@ run_prune_test_images() {
     if [ "$removed" -eq 0 ]; then
         echo "[prune-images] nothing to reclaim (keep $KEEP_IMAGES/repo, <${KEEP_MINUTES}m untouched)"
     else
-        echo "[prune-images] reclaimed $removed image(s)"
+        echo "[prune-images] processed $removed image ref(s)"
     fi
     return 0
 }

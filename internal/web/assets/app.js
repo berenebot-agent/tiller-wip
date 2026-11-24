@@ -2688,12 +2688,43 @@ function errorRouteLabel(provider, model, fallback) {
   if (provider) return model ? `${provider}/${model}` : provider;
   return fallback || 'router';
 }
-// registerErrorDetail stores a dialog payload and returns the data-error-key
-// the rendered error box carries, so every red box clicks through to details.
+// Each view owns the details for its rendered nodes.
+let errorDetailSeq = 0;
+const errorScopes = new Map();
+let activeErrorScope;
+function createErrorScope(name) {
+  const details = new Map();
+  errorScopes.set(name, details);
+  return {
+    details,
+    clear() { details.clear(); },
+    run(render) {
+      const previous = activeErrorScope;
+      activeErrorScope = name;
+      try { return render(); } finally { activeErrorScope = previous; }
+    },
+  };
+}
+const dialogErrors = createErrorScope('dialog');
+const globalErrors = createErrorScope('global');
+const liveErrors = createErrorScope('live');
 function registerErrorDetail(detail) {
-  const key = ++errorDetailSeq;
-  errorDetails.set(key, detail);
+  const key = `${activeErrorScope}:${++errorDetailSeq}`;
+  errorScopes.get(activeErrorScope).set(key, detail);
   return key;
+}
+function removeErrorDetails(container, details) {
+  container.querySelectorAll('[data-error-key]').forEach(node => details.delete(node.dataset.errorKey));
+}
+// Captured message bodies are not in list rows (has_*_body flags only). A detail
+// carrying {lazy: {row, want}} fetches them when it is opened.
+const BODY_SECTIONS = { error: 'Provider error body', request: 'Client request body', response: 'Client response body' };
+function lazyBodies(row, want) {
+  const available = want.filter(kind => row[`has_${kind}_body`]);
+  return available.length ? { row, want: available } : null;
+}
+function bodySections(bodies, want) {
+  return want.filter(kind => bodies[`${kind}_body`] != null).map(kind => `${BODY_SECTIONS[kind]}:\n${bodies[`${kind}_body`]}${bodies[`${kind}_body_truncated`] ? '\n\n[truncated]' : ''}`);
 }
 // activityErrorBox renders a failure as the same red box the attempt rows use
 // (model name + status, click for details). Every Activity error surface goes
@@ -2715,11 +2746,8 @@ function requestErrorDetail(row) {
   parts.push(`Error: ${row.error_text}${row.error_message ? ` — ${row.error_message}` : ''}`);
   if (row.http_status) parts.push(`HTTP status: ${row.http_status}`);
   if (row.latency_ms) parts.push(`Latency: ${row.latency_ms} ms`);
-  if (row.error_body) parts.push(`Provider error body:\n${row.error_body}${row.error_body_truncated ? '\n\n[truncated]' : ''}`);
-  if (row.request_body) parts.push(`Client request body:\n${row.request_body}${row.request_body_truncated ? '\n\n[truncated]' : ''}`);
-  if (row.response_body) parts.push(`Client response body:\n${row.response_body}${row.response_body_truncated ? '\n\n[truncated]' : ''}`);
   if (row.client_request_id) parts.push(`Request ID: ${row.client_request_id}`);
-  return { title: `${route} · ${status}`, body: parts.join('\n\n') };
+  return { title: `${route} · ${status}`, body: parts.join('\n\n'), lazy: lazyBodies(row, ['error', 'request', 'response']) };
 }
 // requestErrorHTML is the red box for a failed request whose attempt rows were
 // not rendered, plus any request-level error the attempt rows cannot carry.
@@ -2738,22 +2766,21 @@ function requestErrorHTML(row, kind) {
 // the table and the mobile card surface stay identical. Every failure renders as
 // a red error box (never bare red text) with the full detail one click away.
 function activityDetailHTML(row, kind) {
-  const fixedAttempt = row.resolved_provider ? { provider: row.resolved_provider, model: row.resolved_model || '', failure_class: row.error_text, latency_ms: row.latency_ms, http_status: row.http_status, error_message: row.error_message, error_body: row.error_body, error_body_truncated: row.error_body_truncated, request_body: row.request_body, request_body_truncated: row.request_body_truncated, response_body: row.response_body, response_body_truncated: row.response_body_truncated, result: row.http_status >= 200 && row.http_status < 300 ? 'success' : 'failed' } : null;
+  const fixedAttempt = row.resolved_provider ? { provider: row.resolved_provider, model: row.resolved_model || '', failure_class: row.error_text, latency_ms: row.latency_ms, http_status: row.http_status, error_message: row.error_message, lazy: { row, want: ['error', 'request', 'response'] }, result: row.http_status >= 200 && row.http_status < 300 ? 'success' : 'failed' } : null;
   // A single failed attempt is already its own red box; anything else (fallback
   // chains, pre-attempt failures) renders the attempt rows plus a request-level
   // box so the request's own outcome is never dropped.
   const singleAttempt = !row.fallback_used && fixedAttempt && row.attempt_rows <= 1;
-  const resolved = singleAttempt ? `<div class="attempt-sequence">${activityAttemptDetails(fixedAttempt, 0)}</div>` : '';
+  const showResolved = kind === 'table' || fixedAttempt?.result === 'success' || !row.error_text;
+  const previewFallback = row.fallback_used && !row.attempts?.length && fixedAttempt?.result === 'success' &&
+    (row.has_request_body || row.has_response_body);
+  const resolved = showResolved && (singleAttempt || previewFallback) ? `<div class="attempt-sequence">${activityAttemptDetails(fixedAttempt, previewFallback ? Math.max(0, (row.attempt_rows || 1) - 1) : 0)}</div>` : '';
   const sequence = singleAttempt ? '' : attemptSequence(row);
   const error = singleAttempt ? '' : requestErrorHTML(row, kind);
   const loadError = row.attemptsError ? `<div class="attempt-sequence">${activityErrorBox({ route: errorRouteLabel(row.resolved_provider, row.resolved_model, row.requested_model), status: 'details', summary: row.attemptsError, extra: `<button type="button" class="activity-retry" data-activity-retry="${h(row.id)}">Retry</button>` })}</div>` : '';
   const pending = activityNeedsAttempts(row) ? '<span class="activity-detail-pending" aria-hidden="true">…</span>' : '';
-  // The mobile card renders its own request-level box next to this body, so the
-  // card variant carries only the hydrated attempt sequence (plus load error /
-  // retry).
-  const parts = kind === 'card' ? [sequence] : [resolved, sequence, error];
   const reasoning = row.reasoning_stripped ? '<span class="activity-reasoning-warning" title="Unverifiable reasoning history was omitted during protocol translation.">Reasoning history omitted</span>' : '';
-  return `${parts.join('')}${reasoning}${loadError}${pending}`;
+  return `${resolved}${sequence}${error}${reasoning}${loadError}${pending}`;
 }
 function resolvedActivity(row) { return activityDetailHTML(row, 'table'); }
 function activityCardDetail(row) { return activityDetailHTML(row, 'card') + `<div class="history-meta">${rowCache(row)}</div>`; }
@@ -2807,11 +2834,14 @@ function createActivityFeed(options) {
     });
   }
   function patch(row) {
-    containers().forEach(container => {
-      if (!container) return;
-      $$('[data-activity-resolved]', container).forEach(el => {
-        if (el.dataset.activityResolved !== row.id) return;
-        el.innerHTML = el.dataset.activityDetailKind === 'card' ? activityCardDetail(row) : resolvedActivity(row);
+    options.errors.run(() => {
+      containers().forEach(container => {
+        if (!container) return;
+        $$('[data-activity-resolved]', container).forEach(el => {
+          if (el.dataset.activityResolved !== row.id) return;
+          removeErrorDetails(el, options.errors.details);
+          el.innerHTML = el.dataset.activityDetailKind === 'card' ? activityCardDetail(row) : resolvedActivity(row);
+        });
       });
     });
   }
@@ -2896,8 +2926,10 @@ function activityFeedURL(kind, client, modelID, offset, limit, search) {
   const base = kind === 'client' ? `/api/admin/client-keys/${client.id}/activity` : kind === 'real' ? `/api/admin/models/${modelID}/activity` : `/api/admin/virtual-models/${modelID}/activity`;
   return `${base}?limit=${limit + 1}&offset=${offset}&search=${encodeURIComponent(search || '')}`;
 }
-function renderActivity(state) { errorDetails.clear(); errorDetailSeq = 0; const showClient = !state.client; $('#activity-client-head').hidden = !showClient; $('#activity-empty').hidden = state.loading || state.rows.length > 0; $('#activity-body').innerHTML = state.loading ? '<tr><td colspan="8"><span class="meta-line">Loading activity…</span></td></tr>' : state.rows.map(row => activityTableRow(row, showClient)).join(''); $('#activity-mobile-body').innerHTML = state.loading ? '<p class="meta-line">Loading activity…</p>' : state.rows.map(row => activityHistoryCard(row, showClient)).join(''); updateActivityCount(state, '#activity-count'); }
-function appendActivity(state, page) { const showClient = !state.client; const table = $('#activity-body'); const cards = $('#activity-mobile-body'); page.forEach(row => { table.insertAdjacentHTML('beforeend', activityTableRow(row, showClient)); cards.insertAdjacentHTML('beforeend', activityHistoryCard(row, showClient)); }); $('#activity-empty').hidden = state.rows.length > 0; updateActivityCount(state, '#activity-count'); }
+function renderActivity(state) { return dialogErrors.run(() => renderActivityInner(state)); }
+function renderActivityInner(state) { dialogErrors.clear(); const showClient = !state.client; $('#activity-client-head').hidden = !showClient; $('#activity-empty').hidden = state.loading || state.rows.length > 0; $('#activity-body').innerHTML = state.loading ? '<tr><td colspan="8"><span class="meta-line">Loading activity…</span></td></tr>' : state.rows.map(row => activityTableRow(row, showClient)).join(''); $('#activity-mobile-body').innerHTML = state.loading ? '<p class="meta-line">Loading activity…</p>' : state.rows.map(row => activityHistoryCard(row, showClient)).join(''); updateActivityCount(state, '#activity-count'); }
+function appendActivity(state, page) { return dialogErrors.run(() => appendActivityInner(state, page)); }
+function appendActivityInner(state, page) { const showClient = !state.client; const table = $('#activity-body'); const cards = $('#activity-mobile-body'); page.forEach(row => { table.insertAdjacentHTML('beforeend', activityTableRow(row, showClient)); cards.insertAdjacentHTML('beforeend', activityHistoryCard(row, showClient)); }); $('#activity-empty').hidden = state.rows.length > 0; updateActivityCount(state, '#activity-count'); }
 const activityFeed = createActivityFeed({
   state: activityState,
   containers: () => [$('#activity-body'), $('#activity-mobile-body')],
@@ -2905,6 +2937,7 @@ const activityFeed = createActivityFeed({
   resetScroll: resetActivityScroll,
   showError: message => { $('#activity-error').textContent = message; },
   fetch: (offset, limit, search, signal) => api(activityFeedURL(activityState.kind, activityState.client, activityState.modelID, offset, limit, search), { signal }),
+  errors: dialogErrors,
   render: renderActivity,
   append: appendActivity,
 });
@@ -2940,37 +2973,27 @@ function activityAttemptDetails(attempt, index) {
   else cls = 'attempt-neutral';
   let clickAttr = '';
   let hoverAttr = '';
+  const lazy = attempt.lazy ? lazyBodies(attempt.lazy.row, attempt.lazy.want) : null;
   if (attempt.result === 'failed') {
-    const key = ++errorDetailSeq;
     const parts = [];
     if (attempt.error_message) parts.push(attempt.error_message);
     if (attempt.failure_class) parts.push(`Resolver: ${attempt.failure_class}`);
     if (attempt.error_body) parts.push(`Provider error body:\n${attempt.error_body}${attempt.error_body_truncated ? '\n\n[truncated]' : ''}`);
-    if (attempt.request_body) parts.push(`Client request body:\n${attempt.request_body}${attempt.request_body_truncated ? '\n\n[truncated]' : ''}`);
-    if (attempt.response_body) parts.push(`Client response body:\n${attempt.response_body}${attempt.response_body_truncated ? '\n\n[truncated]' : ''}`);
     if (attempt.latency_ms) parts.push(`Latency: ${attempt.latency_ms} ms`);
-    errorDetails.set(key, { title: `${route} · ${status}`, body: parts.join('\n\n') || '(no error details)' });
-    clickAttr = ` data-error-key="${key}"`;
+    clickAttr = ` data-error-key="${registerErrorDetail({ title: `${route} · ${status}`, body: parts.join('\n\n') || (lazy ? '' : '(no error details)'), lazy })}"`;
     const hover = [attempt.error_message, attempt.latency_ms ? `Latency: ${attempt.latency_ms} ms` : ''].filter(Boolean).join(' · ');
     if (hover) hoverAttr = ` title="${h(hover)}"`;
-  } else if (attempt.result === 'success' && (attempt.request_body || attempt.response_body)) {
-    const parts = [];
-    if (attempt.request_body) parts.push(`Client request body:\n${attempt.request_body}${attempt.request_body_truncated ? '\n\n[truncated]' : ''}`);
-    if (attempt.response_body) parts.push(`Client response body:\n${attempt.response_body}${attempt.response_body_truncated ? '\n\n[truncated]' : ''}`);
-    clickAttr = ` data-error-key="${registerErrorDetail({ title: `${route} · ${status}`, body: parts.join('\n\n') })}"`;
+  } else if (attempt.result === 'success' && lazy) {
+    clickAttr = ` data-error-key="${registerErrorDetail({ title: `${route} · ${status}`, body: '', lazy })}"`;
   } else if (isCooldown) {
-    const key = ++errorDetailSeq;
-    errorDetails.set(key, { cooldown: { provider: attempt.provider, model: attempt.model, created_at: attempt.created_at }, title: `${route} · cooldown` });
-    clickAttr = ` data-error-key="${key}"`;
+    clickAttr = ` data-error-key="${registerErrorDetail({ cooldown: { provider: attempt.provider, model: attempt.model, created_at: attempt.created_at }, title: `${route} · cooldown` })}"`;
     hoverAttr = ` title="${h('Cooldown — click for details')}"`;
   } else if (isSkipped) {
-    const key = ++errorDetailSeq;
     const parts = [];
     if (attempt.error_message) parts.push(attempt.error_message);
     if (attempt.failure_class) parts.push(`Resolver: ${attempt.failure_class}`);
     if (attempt.latency_ms) parts.push(`Latency: ${attempt.latency_ms} ms`);
-    errorDetails.set(key, { title: `${route} · skipped`, body: parts.join('\n\n') || 'The target was skipped before an upstream request was made.' });
-    clickAttr = ` data-error-key="${key}"`;
+    clickAttr = ` data-error-key="${registerErrorDetail({ title: `${route} · skipped`, body: parts.join('\n\n') || 'The target was skipped before an upstream request was made.' })}"`;
     hoverAttr = ` title="${h('Skipped — click for details')}"`;
   }
   return `<div class="activity-attempt ${cls}"${clickAttr}${hoverAttr}><span class="attempt-number">${String(index + 1).padStart(2, '0')}</span><span class="attempt-route"><code title="${h(route)}">${h(route)}</code></span><span class="attempt-status">${status}</span></div>`;
@@ -2979,15 +3002,18 @@ function activityAttemptDetails(attempt, index) {
 // Full error text for failed attempts. The complete string lives here keyed by
 // the data-error-key rendered above, and is shown in #error-dialog on click. The
 // store is rebuilt on every activity render so keys never go stale.
-let errorDetailSeq = 0;
-const errorDetails = new Map();
+let errorOpenToken = 0;
 let cooldownTickId = null;
 function clearCooldownTick() { if (cooldownTickId !== null) { clearInterval(cooldownTickId); cooldownTickId = null; } }
 function fmtDuration(totalSeconds) { if (totalSeconds <= 0) return '0s'; const s = Math.floor(totalSeconds); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60; if (h > 0) return `${h}h ${m}m ${sec}s`; if (m > 0) return `${m}m ${sec}s`; return `${sec}s`; }
-function openErrorDetail(key) { const detail = errorDetails.get(Number(key)); if (!detail) return; clearCooldownTick(); if (detail.cooldown) { const route = `${detail.cooldown.provider}/${detail.cooldown.model}`; $('#error-title').textContent = detail.title; $('#copy-error').hidden = !(window.isSecureContext && navigator.clipboard?.writeText); $('#clear-cooldown').hidden = false; $('#error-dialog').showModal();
+function openErrorDetail(key) { const detail = errorScopes.get(key.split(':', 1)[0])?.get(key); if (!detail) return; clearCooldownTick(); const openToken = ++errorOpenToken;
+  const retryBodies = $('#retry-error-bodies');
+  retryBodies.hidden = true;
+  retryBodies.onclick = null;
+  if (detail.cooldown) { const route = `${detail.cooldown.provider}/${detail.cooldown.model}`; $('#error-title').textContent = detail.title; $('#copy-error').hidden = !(window.isSecureContext && navigator.clipboard?.writeText); $('#clear-cooldown').hidden = false; $('#error-dialog').showModal();
   const bodyEl = $('#error-body'); $('#error-copy-state').textContent = '';
   bodyEl.textContent = 'Checking cooldown state…';
-  const setBody = state => bodyEl.textContent = state;
+  const setBody = state => { if (openToken === errorOpenToken) bodyEl.textContent = state; };
   const renderCooling = cool => {
     const ago = cool.ago_seconds + ((Date.now() - cool.fetchedAt) / 1000);
     const rest = cool.restored_in_seconds - ((Date.now() - cool.fetchedAt) / 1000);
@@ -3006,22 +3032,55 @@ function openErrorDetail(key) { const detail = errorDetails.get(Number(key)); if
     setBody(lines.join('\n\n'));
   };
   const loadStatus = async () => {
-    try { const res = await api(`/api/admin/cooldown?provider=${encodeURIComponent(detail.cooldown.provider)}&model=${encodeURIComponent(detail.cooldown.model)}`); const cool = { ...res, fetchedAt: Date.now() }; if (cool.cooling) { renderCooling(cool); clearCooldownTick(); cooldownTickId = setInterval(() => renderCooling(cool), 1000); } else { renderExpired(); } } catch (error) { setBody('Could not load cooldown state: ' + errorMessage(error)); }
+    try { const res = await api(`/api/admin/cooldown?provider=${encodeURIComponent(detail.cooldown.provider)}&model=${encodeURIComponent(detail.cooldown.model)}`); if (openToken !== errorOpenToken) return; const cool = { ...res, fetchedAt: Date.now() }; if (cool.cooling) { renderCooling(cool); clearCooldownTick(); cooldownTickId = setInterval(() => renderCooling(cool), 1000); } else { renderExpired(); } } catch (error) { setBody('Could not load cooldown state: ' + errorMessage(error)); }
   };
   $('#clear-cooldown').onclick = async () => { const button = $('#clear-cooldown'); button.disabled = true; try { await api(`/api/admin/cooldown?provider=${encodeURIComponent(detail.cooldown.provider)}&model=${encodeURIComponent(detail.cooldown.model)}`, { method: 'DELETE' }); clearCooldownTick(); renderExpired(); } catch (error) { setBody('Could not clear cooldown: ' + errorMessage(error)); } finally { button.disabled = false; } };
   loadStatus();
   return; }
-  $('#error-title').textContent = detail.title; $('#error-body').textContent = detail.body; $('#error-copy-state').textContent = ''; $('#copy-error').hidden = !(window.isSecureContext && navigator.clipboard?.writeText); $('#clear-cooldown').hidden = true; $('#error-dialog').showModal(); }
+  const lazy = detail.lazy;
+  const body = $('#error-body');
+  const compose = extra => [detail.body, ...extra].filter(Boolean).join('\n\n');
+  $('#error-title').textContent = detail.title;
+  body.textContent = lazy?.row.bodies ? compose(bodySections(lazy.row.bodies, lazy.want)) : detail.body;
+  $('#error-copy-state').textContent = '';
+  $('#copy-error').hidden = !(window.isSecureContext && navigator.clipboard?.writeText);
+  $('#clear-cooldown').hidden = true;
+  $('#error-dialog').showModal();
+  if (!lazy || lazy.row.bodies) return;
+
+  async function loadBodies() {
+    retryBodies.hidden = true;
+    body.textContent = compose(['Loading message bodies…']);
+    try {
+      const bodies = await api(`/api/admin/activity/${encodeURIComponent(lazy.row.id)}/bodies`);
+      lazy.row.bodies = bodies;
+      if (openToken === errorOpenToken) body.textContent = compose(bodySections(bodies, lazy.want));
+    } catch (error) {
+      if (openToken !== errorOpenToken) return;
+      body.textContent = compose([`Could not load message bodies: ${errorMessage(error)}`]);
+      retryBodies.hidden = false;
+    }
+  }
+  retryBodies.onclick = loadBodies;
+  loadBodies();
+}
 document.addEventListener('click', event => { const target = event.target.closest('[data-error-key]'); if (target) openErrorDetail(target.dataset.errorKey); });
 $('#copy-error').onclick = async () => { const text = $('#error-body').textContent; const state = $('#error-copy-state'); if (!(window.isSecureContext && navigator.clipboard?.writeText)) return; try { await navigator.clipboard.writeText(text); state.textContent = 'Copied to clipboard.'; } catch { state.textContent = 'Clipboard copy was denied — select the text and press Ctrl/Cmd+C.'; } };
-$('#close-error').onclick = $('#done-error').onclick = () => { clearCooldownTick(); $('#error-dialog').close(); };
-  function attemptSequence(row) { if (!row.attempts?.length) return ''; return `<div class="attempt-sequence">${row.attempts.map((attempt, index) => activityAttemptDetails({ ...attempt, ...(index === 0 ? { request_body: row.request_body, request_body_truncated: row.request_body_truncated } : {}), ...(attempt.result === 'success' ? { request_body: row.request_body, request_body_truncated: row.request_body_truncated, response_body: row.response_body, response_body_truncated: row.response_body_truncated } : {}) }, index)).join('')}</div>`; }
+$('#close-error').onclick = $('#done-error').onclick = () => $('#error-dialog').close();
+$('#error-dialog').addEventListener('close', () => {
+  if ($('#error-dialog').open) return;
+  errorOpenToken++;
+  clearCooldownTick();
+  $('#error-body').textContent = '';
+  $('#retry-error-bodies').onclick = null;
+});
+  function attemptSequence(row) { if (!row.attempts?.length) return ''; return `<div class="attempt-sequence">${row.attempts.map((attempt, index) => activityAttemptDetails({ ...attempt, lazy: { row, want: attempt.result === 'success' ? ['request', 'response'] : index === 0 ? ['request'] : [] } }, index)).join('')}</div>`; }
  function requestIdentity(row) { const requestedModel = h(row.requested_model); const requestedTitle = h(row.requested_model); if (row.exposed_model && row.exposed_model !== row.requested_model) { return `<code class="model-id activity-requested-model" title="${requestedTitle}">${requestedModel}</code><br><span class="meta-line activity-exposed-model" title="${h(row.exposed_model)}">map &gt; ${h(row.exposed_model)}</span>`; } return `<code class="model-id activity-requested-model" title="${requestedTitle}">${requestedModel}</code>`; }
 function activityRequestID(row) { const id = row.client_request_id || ''; const short = id.length > 8 ? `${id.slice(0, 8)}…` : id; const copyable = id && (window.isSecureContext && navigator.clipboard?.writeText); const attrs = copyable ? ` data-copy-request-id="${h(id)}" role="button" tabindex="0" aria-label="Copy request ID ${h(id)}"` : ''; return `<code class="model-id activity-request-id"${attrs} title="${h(id)}">${h(short)}</code>`; }
 async function copyRequestID(button) { const id = button.dataset.copyRequestId; if (!id) return; if (!(window.isSecureContext && navigator.clipboard?.writeText)) return; try { await navigator.clipboard.writeText(id); const original = button.textContent; button.classList.add('copied'); button.textContent = 'Copied'; setTimeout(() => { button.classList.remove('copied'); button.textContent = original; }, 1200); } catch { const range = document.createRange(); range.selectNodeContents(button); const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range); button.title = 'Press Ctrl/Cmd+C to copy'; } }
 document.addEventListener('click', event => { const target = event.target.closest('[data-copy-request-id]'); if (target) copyRequestID(target); });
 document.addEventListener('keydown', event => { if (event.key !== 'Enter' && event.key !== ' ') return; const target = event.target.closest('[data-copy-request-id]'); if (!target) return; event.preventDefault(); copyRequestID(target); });
- function activityHistoryCard(row, showClient = true) {
+function activityHistoryCard(row, showClient = true) {
   const status = row.http_status >= 200 && row.http_status < 300 ? 'Succeeded' : `HTTP ${row.http_status || 'error'}`;
   const statusClass = row.http_status >= 200 && row.http_status < 300 ? 'history-success' : 'history-failure';
   const resolved = row.resolved_provider && row.resolved_model ? `${row.resolved_provider}/${row.resolved_model}` : 'No resolved target';
@@ -3057,7 +3116,7 @@ $('#export-activity').onclick = () => openExportDialog({ kind: activityState.kin
 $('#export-global-activity').onclick = () => openExportDialog({ kind: '', client: null, modelID: '', search: globalActivityState.search });
 $('#clear-activity').onclick = async () => {
   if (activityState.kind !== 'client' || !activityState.client) return;
-  if (!await confirmAction({ title: `Clear ${activityState.client.name} activity?`, copy: 'All recorded request metadata for this client will be permanently deleted.', action: 'Clear activity' })) return;
+  if (!await confirmAction({ title: `Clear ${activityState.client.name} activity?`, copy: 'All recorded Activity for this client, including any captured message bodies, will be permanently deleted.', action: 'Clear activity' })) return;
   const button = $('#clear-activity'); button.disabled = true; $('#activity-error').textContent = '';
   try {
     await api(`/api/admin/client-keys/${activityState.client.id}/activity`, { method: 'DELETE' });
@@ -3093,8 +3152,10 @@ $('#export-custom').onclick = () => {
 // hydration) so fallbacks appear identically — the extra Client column is the
 // only difference.
 const globalActivityState = { rows: [], offset: 0, limit: ACTIVITY_PAGE_SIZE, search: '', hasMore: true, loading: false };
-function renderGlobalActivity(state) { errorDetails.clear(); errorDetailSeq = 0; $('#global-activity-empty').hidden = state.loading || state.rows.length > 0; $('#global-activity-empty-mobile').hidden = state.loading || state.rows.length > 0; $('#global-activity-body').innerHTML = state.loading ? '<tr><td colspan="8"><span class="meta-line">Loading activity…</span></td></tr>' : state.rows.map(row => activityTableRow(row, true)).join(''); $('#global-activity-cards').innerHTML = state.loading ? '<p class="meta-line">Loading activity…</p>' : state.rows.map(row => activityHistoryCard(row, true)).join(''); updateActivityCount(state, '#global-activity-count'); }
-function appendGlobalActivity(state, page) { const table = $('#global-activity-body'); const cards = $('#global-activity-cards'); page.forEach(row => { table.insertAdjacentHTML('beforeend', activityTableRow(row, true)); cards.insertAdjacentHTML('beforeend', activityHistoryCard(row, true)); }); $('#global-activity-empty').hidden = state.rows.length > 0; $('#global-activity-empty-mobile').hidden = state.rows.length > 0; updateActivityCount(state, '#global-activity-count'); }
+function renderGlobalActivity(state) { return globalErrors.run(() => renderGlobalActivityInner(state)); }
+function renderGlobalActivityInner(state) { globalErrors.clear(); $('#global-activity-empty').hidden = state.loading || state.rows.length > 0; $('#global-activity-empty-mobile').hidden = state.loading || state.rows.length > 0; $('#global-activity-body').innerHTML = state.loading ? '<tr><td colspan="8"><span class="meta-line">Loading activity…</span></td></tr>' : state.rows.map(row => activityTableRow(row, true)).join(''); $('#global-activity-cards').innerHTML = state.loading ? '<p class="meta-line">Loading activity…</p>' : state.rows.map(row => activityHistoryCard(row, true)).join(''); updateActivityCount(state, '#global-activity-count'); }
+function appendGlobalActivity(state, page) { return globalErrors.run(() => appendGlobalActivityInner(state, page)); }
+function appendGlobalActivityInner(state, page) { const table = $('#global-activity-body'); const cards = $('#global-activity-cards'); page.forEach(row => { table.insertAdjacentHTML('beforeend', activityTableRow(row, true)); cards.insertAdjacentHTML('beforeend', activityHistoryCard(row, true)); }); $('#global-activity-empty').hidden = state.rows.length > 0; $('#global-activity-empty-mobile').hidden = state.rows.length > 0; updateActivityCount(state, '#global-activity-count'); }
 const globalActivityFeed = createActivityFeed({
   state: globalActivityState,
   containers: () => [$('#global-activity-body'), $('#global-activity-cards')],
@@ -3107,6 +3168,7 @@ const globalActivityFeed = createActivityFeed({
   resetScroll: () => { const shell = $('#global-activity-body').closest('.activity-table-shell'); if (shell) shell.scrollTop = 0; },
   showError: message => { $('#global-activity-error').textContent = message; },
   fetch: (offset, limit, search, signal) => api(`/api/admin/activity?limit=${limit + 1}&offset=${offset}&search=${encodeURIComponent(search || '')}`, { signal }),
+  errors: globalErrors,
   render: renderGlobalActivity,
   append: appendGlobalActivity,
 });
@@ -4021,7 +4083,9 @@ function destroyActivityView() {
 // cells; state is always kept current so a reconcile paint on close/nav is
 // instant.
 const live = new LiveStream('/api/admin/live', { onAuthFailure: () => showLogin() });
-const liveRequests = new LiveRequests($('#view-activity'), { api, h, date, when: relativeAge, requestIdentity, rowCache, errorClassSummary, errorRouteLabel, activityErrorBox });
+const liveRequests = new LiveRequests($('#view-activity'), { api, h, date, when: relativeAge, requestIdentity, rowCache, errorClassSummary, errorRouteLabel, activityErrorBox: options => liveErrors.run(() => activityErrorBox(options)),
+  removeErrorDetails: container => removeErrorDetails(container, liveErrors.details),
+});
 live.on('request', row => liveRequests.onRequest(row));
 live.on('connection', payload => liveRequests.setConnection(payload.state));
 let livePendingReconcile = false;
@@ -4409,6 +4473,7 @@ async function setupAnalyticsConsent() {
     if (sessionHint()) showBootSkeleton();
     const runtime = await fetch('/api/runtime', { credentials: 'same-origin' }).then(res => res.json());
     runtimeMode = runtime.mode === 'hosted' ? 'hosted' : 'local';
+    $('#logging-privacy').hidden = runtimeMode !== 'hosted';
     if (runtimeMode === 'hosted') {
       $('#login-identity-label').firstChild.textContent = 'Email ';
       $('#login-submit').textContent = 'Sign in';

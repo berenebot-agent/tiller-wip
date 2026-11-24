@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -44,6 +45,26 @@ type requestAttemptView struct {
 	CreatedAt          string  `json:"created_at"`
 }
 
+// getActivityBodies returns one request's captured message bodies. The list
+// endpoints omit them; the console fetches them when a request is opened.
+func (s *Server) getActivityBodies(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	v, err := s.scope(r).ActivityBodies(r.Context(), r.PathValue("id"))
+	if errors.Is(err, sql.ErrNoRows) {
+		adminError(w, 404, "not_found", "Request not found.")
+		return
+	}
+	if err != nil {
+		activityReadError(w, err, "Could not load request bodies.")
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"request_body": v.RequestBody, "request_body_truncated": v.RequestBodyTruncated,
+		"response_body": v.ResponseBody, "response_body_truncated": v.ResponseBodyTruncated,
+		"error_body": v.ErrorBody, "error_body_truncated": v.ErrorBodyTruncated,
+	})
+}
+
 func (s *Server) listRequestAttempts(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.scope(r).ListRequestAttempts(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -83,18 +104,20 @@ type activityView struct {
 	ClientRequestID          string  `json:"client_request_id"`
 	ErrorText                *string `json:"error_text"`
 	ErrorMessage             *string `json:"error_message"`
-	RequestBody              *string `json:"request_body"`
-	RequestBodyTruncated     bool    `json:"request_body_truncated"`
-	ResponseBody             *string `json:"response_body"`
-	ResponseBodyTruncated    bool    `json:"response_body_truncated"`
-	ErrorBody                *string `json:"error_body"`
-	ErrorBodyTruncated       bool    `json:"error_body_truncated"`
-	AttemptCount             int     `json:"attempt_count"`
-	AttemptRows              int     `json:"attempt_rows"`
-	ReasoningStripped        bool    `json:"reasoning_stripped"`
-	FallbackUsed             bool    `json:"fallback_used"`
-	FallbackReason           *string `json:"fallback_reason"`
-	CreatedAt                string  `json:"created_at"`
+	// Bodies are not listed; the flags say a body exists and
+	// GET /api/admin/activity/{id}/bodies returns it on demand.
+	HasRequestBody        bool    `json:"has_request_body"`
+	RequestBodyTruncated  bool    `json:"request_body_truncated"`
+	HasResponseBody       bool    `json:"has_response_body"`
+	ResponseBodyTruncated bool    `json:"response_body_truncated"`
+	HasErrorBody          bool    `json:"has_error_body"`
+	ErrorBodyTruncated    bool    `json:"error_body_truncated"`
+	AttemptCount          int     `json:"attempt_count"`
+	AttemptRows           int     `json:"attempt_rows"`
+	ReasoningStripped     bool    `json:"reasoning_stripped"`
+	FallbackUsed          bool    `json:"fallback_used"`
+	FallbackReason        *string `json:"fallback_reason"`
+	CreatedAt             string  `json:"created_at"`
 }
 
 func activityViewFromStore(row store.ActivityRow) activityView {
@@ -123,11 +146,11 @@ func activityViewFromStore(row store.ActivityRow) activityView {
 		ClientRequestID:          row.ClientRequestID,
 		ErrorText:                row.ErrorText,
 		ErrorMessage:             row.ErrorMessage,
-		RequestBody:              row.RequestBody,
+		HasRequestBody:           row.HasRequestBody,
 		RequestBodyTruncated:     row.RequestBodyTruncated,
-		ResponseBody:             row.ResponseBody,
+		HasResponseBody:          row.HasResponseBody,
 		ResponseBodyTruncated:    row.ResponseBodyTruncated,
-		ErrorBody:                row.ErrorBody,
+		HasErrorBody:             row.HasErrorBody,
 		ErrorBodyTruncated:       row.ErrorBodyTruncated,
 		AttemptCount:             row.AttemptCount,
 		AttemptRows:              row.AttemptRows,

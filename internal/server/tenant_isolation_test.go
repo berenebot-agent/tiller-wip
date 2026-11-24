@@ -133,6 +133,35 @@ func TestCrossAccountHTTPIsolation(t *testing.T) {
 		}
 	}
 
+	// Body detail is available to the request's account only.
+	const requestID = "activity-body-isolation"
+	insertAccountActivityRow(t, appA, database.LocalAccountID, requestID, 500)
+	bodyPath := "/api/admin/activity/" + requestID + "/bodies"
+	status, payload, header := apiA.request("GET", bodyPath, nil)
+	if status != 200 || payload["request_body"] != "PROMPT-SECRET-MARKER" || payload["error_body"] != "ERROR-BODY-MARKER" || header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("A body detail = %d, want recorded bodies and no-store", status)
+	}
+	if status, _, _ = apiB.request("GET", bodyPath, nil); status != 404 {
+		t.Fatalf("B body detail = %d, want 404", status)
+	}
+	anon := &testAPI{t: t, base: apiA.base, client: &http.Client{}, server: appA}
+	if status, _, _ = anon.request("GET", bodyPath, nil); status != 401 {
+		t.Fatalf("anonymous body detail = %d, want 401", status)
+	}
+	status, payload, _ = apiA.request("GET", "/api/admin/activity", nil)
+	if status != 200 || !listContains(payload, "id", requestID) {
+		t.Fatalf("A activity list = %d, want seeded row", status)
+	}
+	row := payload["data"].([]any)[0].(map[string]any)
+	if row["has_request_body"] != true || row["has_error_body"] != true || row["has_response_body"] != false {
+		t.Fatal("activity list returned incorrect body presence flags")
+	}
+	for _, field := range []string{"request_body", "response_body", "error_body"} {
+		if _, ok := row[field]; ok {
+			t.Errorf("activity list included %s", field)
+		}
+	}
+
 	// --- B creates its own provider + manual model ---
 	status, payload, _ = apiB.request("POST", "/api/admin/providers", map[string]any{"name": "prov-b", "type": "generic-openai", "base_url": "http://127.0.0.1:1/v1", "credential": "key-b"})
 	if status != 201 {

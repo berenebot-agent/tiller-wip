@@ -438,7 +438,7 @@ func TestProviderRefreshRateLimitedPerAccount(t *testing.T) {
 }
 
 // CAPTCHA verification uses a local mock; no external service is contacted.
-func TestPlatformLoginChallengeAfterDistributedFailures(t *testing.T) {
+func TestPlatformLoginChallengeWhenConfigured(t *testing.T) {
 	t.Parallel()
 	app, api, _ := hostedAccountServer(t)
 	err := app.storeHandle().SavePlatformSettings(context.Background(), store.PlatformSettingsProposal{
@@ -463,9 +463,6 @@ func TestPlatformLoginChallengeAfterDistributedFailures(t *testing.T) {
 	}))
 	defer verifier.Close()
 	app.turnstileVerifier = hostedauth.NewTurnstileVerifier(&http.Client{Transport: platformCaptchaTransport{url: verifier.URL}})
-	for i := 0; i < 20; i++ {
-		app.platformGlobalLimiter.recordFailure(platformGlobalKey)
-	}
 	anon := &testAPI{t: t, base: api.base, client: &http.Client{}, server: app}
 	for _, tc := range []struct {
 		token string

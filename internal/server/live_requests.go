@@ -200,7 +200,6 @@ func (s *Server) reconcileLiveRequests(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			v := liveRequestView{globalActivityView: globalActivityView{activityView: activityViewFromStore(row), ClientKeyID: row.ClientKeyID, ClientName: row.ClientName}, State: "success", Attempts: []requestAttemptView{}}
-			v.RequestBody, v.ErrorBody, v.ErrorMessage = nil, nil, nil
 			if row.HTTPStatus < 200 || row.HTTPStatus >= 300 || row.ErrorText != nil {
 				v.State = "failed"
 			}

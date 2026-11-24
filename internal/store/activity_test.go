@@ -80,9 +80,14 @@ func TestActivityIsAccountScoped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(globalLocal) != 1 || globalLocal[0].ID != "row-local" || !globalLocal[0].ReasoningStripped || globalLocal[0].ResponseBody == nil || *globalLocal[0].ResponseBody != body {
+	if len(globalLocal) != 1 || globalLocal[0].ID != "row-local" || !globalLocal[0].ReasoningStripped || !globalLocal[0].HasResponseBody || globalLocal[0].ResponseBody != nil {
 		t.Fatalf("local account sees %d rows (%v), want only row-local", len(globalLocal), ids(globalLocal))
 	}
+	captured, err := local.ActivityBodies(ctx, "row-local")
+	if err != nil || captured.ResponseBody == nil || *captured.ResponseBody != body {
+		t.Fatalf("could not load captured response body: %v", err)
+	}
+
 	globalOther, err := other.ListGlobalActivity(ctx, "", 100, 0)
 	if err != nil {
 		t.Fatal(err)

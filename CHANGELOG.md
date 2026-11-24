@@ -7,6 +7,13 @@ a stable `1.0`.
 
 ## [Unreleased]
 
+- Activity history loads captured request and response bodies when you open
+  details, including for direct and fallback requests on mobile. The management
+  Activity list API returns body-presence flags. Fetch the bodies at
+  `GET /api/admin/activity/{id}/bodies` or through CSV export.
+- Hosted Settings links to the Privacy Policy alongside the opt-in body logging
+  controls.
+
 ## [0.1.0] - 2026-11-20
 
 First non-prerelease version, ending the `0.1.0` beta series. Tiller Router is

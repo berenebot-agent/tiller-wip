@@ -187,9 +187,10 @@ passwords use Argon2id (64 MiB/3/4); verification and reset links are opaque,
 single-use, short-lived, and hash-only at rest. Customer sessions and platform
 operator sessions use separate host-only Secure/HttpOnly/SameSite cookies and
 CSRF tokens. Account suspension immediately revokes customer sessions and
-blocks client-key traffic. Hosted detailed body logging is off by default and
-only ever captures when the account operator opts in (see *Detailed error
-logging* below). Customer login and recovery
+blocks client-key traffic. Both hosted body logging settings default to off.
+An account operator can opt in account-wide or per client. The published hosted
+Privacy Policy should describe captured content, Activity retention and CSV
+exports. Customer login and recovery
 requests have in-memory per-IP budgets; login and recovery also use normalized-
 email keyed throttles. The per-email login failure lockout can temporarily block
 an account after repeated failed attempts regardless of source IP; this targeted

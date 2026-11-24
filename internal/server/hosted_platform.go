@@ -18,9 +18,6 @@ import (
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
-// platformGlobalKey is the single bucket for the all-IP platform login limit.
-const platformGlobalKey = "platform"
-
 func (s *Server) platformLogin(w http.ResponseWriter, r *http.Request) {
 	if !s.sameOriginRequest(r) {
 		// A console login rejected here is almost always a transport
@@ -63,7 +60,6 @@ func (s *Server) platformLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.identity.AuthenticatePlatform(input.Username, input.Password, s.config.TillerPlatformAdminUser, s.config.TillerPlatformAdminPassword) {
 		s.loginLimiter.recordFailure(key)
-		s.platformGlobalLimiter.recordFailure(platformGlobalKey)
 		adminError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid platform credentials.")
 		return
 	}

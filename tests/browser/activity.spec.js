@@ -61,8 +61,18 @@ test('activity records real inference: success, upstream failure, and ordered fa
   const failure = rows.find(r => r.http_status === 500);
   expect(fallback).toBeTruthy();
   expect(success).toBeTruthy();
-  expect(success.request_body).toContain('e2e');
-  expect(success.response_body).toBeTruthy();
+  expect(success.has_request_body).toBe(true);
+  expect(success.has_response_body).toBe(true);
+  for (const row of rows) {
+    expect(row).not.toHaveProperty('request_body');
+    expect(row).not.toHaveProperty('response_body');
+    expect(row).not.toHaveProperty('error_body');
+  }
+  const bodiesRes = await page.request.get(`/api/admin/activity/${success.id}/bodies`);
+  expect(bodiesRes.ok()).toBeTruthy();
+  const bodies = await bodiesRes.json();
+  expect(bodies.request_body).toContain('e2e');
+  expect(bodies.response_body).toBeTruthy();
   expect(failure).toBeTruthy();
 
   // Success row: resolved target, one success attempt.
@@ -96,16 +106,45 @@ test('activity records real inference: success, upstream failure, and ordered fa
   expect(fbAttempts[1].result).toBe('success');
   expect(fbAttempts[1].model).toBe('mock-model-b');
 
+  let bodyRequests = 0;
+  await page.route(`**/api/admin/activity/${success.id}/bodies`, async route => {
+    bodyRequests += 1;
+    if (bodyRequests === 1) await route.fulfill({ status: 503, json: { error: { message: 'Temporarily unavailable' } } });
+    else await route.continue();
+  });
+  let releaseFallbackAttempts;
+  const fallbackAttemptsReady = new Promise(resolve => { releaseFallbackAttempts = resolve; });
+  await page.route(`**/api/admin/activity/${fallback.id}/attempts`, async route => {
+    await fallbackAttemptsReady;
+    await route.continue();
+  });
+
   // The Activity UI renders the three real-inference rows (global view; the
   // lane was cleared at the start so these are the only rows).
   await page.locator('#nav-links').getByRole('link', { name: 'Activity' }).click();
   await page.locator('[data-activity-tab="history"]').click();
   await expect(page.locator('#activity-panel-history')).toBeVisible();
   await expect(page.locator('#global-activity-body tr')).toHaveCount(3);
-  await page.locator('#global-activity-body .attempt-success[data-error-key]').first().click();
+  expect(bodyRequests).toBe(0);
+  await page.locator(`#global-activity-body [data-activity-row="${success.id}"] .attempt-success[data-error-key]`).click();
+  await expect(page.locator('#error-body')).toContainText('Could not load message bodies');
+  await page.locator('#retry-error-bodies').click();
   await expect(page.locator('#error-body')).toContainText('Client request body:');
   await expect(page.locator('#error-body')).toContainText('Client response body:');
   await page.locator('#done-error').click();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  for (const row of [success, fallback]) {
+    const card = page.locator(`#global-activity-cards [data-activity-row="${row.id}"]`);
+    await card.locator('.attempt-success[data-error-key]').click();
+    await expect(page.locator('#error-body')).toContainText('Client request body:');
+    await expect(page.locator('#error-body')).toContainText('Client response body:');
+    await page.locator('#done-error').click();
+  }
+  expect(bodyRequests).toBe(2); // The mobile view reuses the loaded direct request.
+  releaseFallbackAttempts();
+  await page.unroute(`**/api/admin/activity/${fallback.id}/attempts`);
+  await page.setViewportSize({ width: 1440, height: 900 });
 
   // Opening a client Activity dialog renders the newest window immediately and
   // backfills attempt details as rows scroll into view. There is no "Show
@@ -124,6 +163,13 @@ test('activity records real inference: success, upstream failure, and ordered fa
   await expect(page.locator('#activity-body .activity-attempts-load')).toHaveCount(0);
   await expect.poll(() => attemptRequests).toBeGreaterThan(0);
   await expect(page.locator('#activity-body .attempt-failed').first()).toBeVisible();
+  await page.locator('#done-activity').click();
+
+  // The previously rendered global view remains mounted when Clients is shown.
+  const globalDetail = page.locator(`#global-activity-body [data-activity-row="${failure.id}"] .activity-error-box`);
+  await globalDetail.dispatchEvent('click');
+  await expect(page.locator('#error-body')).toContainText('HTTP status: 500');
+  await page.locator('#done-error').click();
 });
 
 // Data-volume: 55 rows seeded directly (28 client-one + 27 client-two) exercise
@@ -370,4 +416,7 @@ test('activity renders every failure as a clickable error box, not bare text', a
   await expect(card.locator('.history-error .activity-error-box')).toHaveCount(1);
   await expect(card.locator('.error-text')).toHaveCount(0);
   await expect(card.locator('.history-error .attempt-error-summary')).toHaveText('Model not found');
+  await card.locator('.history-error .activity-error-box').click();
+  await expect(page.locator('#error-body')).toContainText('model_not_found');
+  await page.locator('#done-error').click();
 });

@@ -214,10 +214,6 @@ func TestPlatformLoginSkipsTurnstileOnDedicatedPort(t *testing.T) {
 	if p := platformProbe(t, private.URL); p["turnstile_enabled"] != false || p["turnstile_site_key"] != "" {
 		t.Fatalf("dedicated-port probe = %v, want Turnstile disabled", p)
 	}
-	// Even after the global failure threshold, no challenge is demanded.
-	for i := 0; i < 20; i++ {
-		app.platformGlobalLimiter.recordFailure(platformGlobalKey)
-	}
 	jar, _ := cookiejar.New(nil)
 	resp, payload := platformLoginRequest(t, &http.Client{Jar: jar}, private.URL, "")
 	if resp.StatusCode != http.StatusOK {

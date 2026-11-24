@@ -1,7 +1,7 @@
 // Request-level live view. No completed-history seed or browser persistence.
 // The graph retains its separate aggregate feed.
 export class LiveRequests {
-  constructor(root, { api, h, date, when, requestIdentity, rowCache, errorClassSummary, errorRouteLabel, activityErrorBox }) {
+  constructor(root, { api, h, date, when, requestIdentity, rowCache, errorClassSummary, errorRouteLabel, activityErrorBox, removeErrorDetails }) {
     // The error-box helpers live in app.js (which owns the #error-dialog
     // payload store) and are injected; a bare module instance falls back to
     // the raw failure class so it can never throw on a missing renderer.
@@ -10,6 +10,7 @@ export class LiveRequests {
       errorClassSummary: errorClassSummary || (cls => cls || 'Request failed'),
       errorRouteLabel: errorRouteLabel || ((provider, model, fallback) => (provider ? (model ? `${provider}/${model}` : provider) : (fallback || 'router'))),
       activityErrorBox: activityErrorBox || null,
+      removeErrorDetails,
     });
     this.rows = new Map();
     this.expanded = new Set();
@@ -65,8 +66,12 @@ export class LiveRequests {
     this.omitted.clear();
     this.seen.clear();
     this.reconciling = false;
-    for (const node of [...this.root.querySelector('#live-requests-body').tBodies]) node.remove();
-    this.root.querySelector('#mobile-activity-body').replaceChildren();
+    const table = this.root.querySelector('#live-requests-body');
+    const cards = this.root.querySelector('#mobile-activity-body');
+    this.removeErrorDetails?.(table);
+    this.removeErrorDetails?.(cards);
+    for (const node of [...table.tBodies]) node.remove();
+    cards.replaceChildren();
   }
 
   setConnection(state) {
@@ -242,7 +247,11 @@ export class LiveRequests {
     const before = new Map(mounted.map(node => [node, node.getBoundingClientRect().top]));
     const keep = new Set(rows.map(row => row.id));
     for (const container of [table, cards]) {
-      for (const node of [...container.children]) if (node.dataset.liveRequest && !keep.has(node.dataset.liveRequest)) node.remove();
+      for (const node of [...container.children]) {
+        if (!node.dataset.liveRequest || keep.has(node.dataset.liveRequest)) continue;
+        this.removeErrorDetails?.(node);
+        node.remove();
+      }
     }
     const groupsByID = new Map([...table.tBodies].map(node => [node.dataset.liveRequest, node]));
     const cardsByID = new Map([...cards.children].map(node => [node.dataset.liveRequest, node]));
@@ -263,6 +272,7 @@ export class LiveRequests {
       const groupNew = !group;
       if (groupNew) { group = document.createElement('tbody'); group.dataset.liveRequest = row.id; }
       if (group.dataset.renderKey !== key) {
+        this.removeErrorDetails?.(group);
         group.dataset.renderKey = key;
         group.innerHTML = `<tr><td>${this.ageHTML(row)}</td><td><strong class="client-name">${this.h(row.client_name)}</strong></td><td>${this.requestIdentity(row)}</td><td>${this.targetHTML(row)}</td><td>${this.elapsedHTML(row)}</td><td>${this.rowCache(row)}</td></tr>${this.expanded.has(row.id) ? `<tr class="live-chain-row"><td colspan="6">${this.chainHTML(row)}</td></tr>` : ''}`;
       }
@@ -273,6 +283,7 @@ export class LiveRequests {
       const cardNew = !card;
       if (cardNew) { card = document.createElement('article'); card.className = 'live-activity-card'; card.dataset.liveRequest = row.id; }
       if (card.dataset.renderKey !== key) {
+        this.removeErrorDetails?.(card);
         card.dataset.renderKey = key;
         card.innerHTML = `<div class="live-activity-top"><strong>${this.h(row.client_name)}</strong><div class="live-request-mobile-route">${this.requestIdentity(row)}<span aria-hidden="true"> → </span>${this.targetHTML(row)}</div></div>${this.chainHTML(row)}`;
       }
