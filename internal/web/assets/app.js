@@ -1198,7 +1198,17 @@ function providerFields(provider) {
     ${isOAuthEdit ? '' : urlLocked ? `<label>Base URL <input autocomplete="off" name="base_url" type="url" value="${h(provider?.base_url || '')}" disabled><small>Fixed for this provider type so its credential cannot be sent to another host. Delete and recreate the provider to use a different endpoint.</small></label>` : `<label>Base URL <input autocomplete="off" name="base_url" type="url" value="${h(provider?.base_url || '')}" placeholder="https://api.example.com/v1" required>${provider ? '<small>Changing the host clears the stored credential.</small>' : ''}</label>${provider ? '<label class="confirm-check" data-confirm-host-wrap hidden><input name="confirm_credential_reset" type="checkbox"> <span>Confirm: the stored credential will be cleared. Enter the credential for the new host below.</span></label>' : ''}`}
     ${provider ? '' : '<div data-credential-create><label data-api-credential>API credential <input name="credential" type="password" autocomplete="new-password"><small>Write-only. Leave empty only when the provider permits unauthenticated access.</small></label></div>'}
     ${provider && !isOAuthEdit ? `<label data-credential-replace>Replacement credential <input name="credential" type="password" autocomplete="new-password" placeholder="•••••••• (set)"><small>A credential is configured. Type a new value to replace it.</small></label>` : ''}
-    ${isOAuthEdit ? '<div data-provider-reconnect><label>OAuth connection <button type="button" class="btn btn-secondary" data-provider-reconnect-btn>Reconnect</button><small>Start a fresh OAuth sign-in. Replaces any saved token for this provider.</small></label></div><div data-provider-disconnect><button type="button" class="btn btn-danger" data-provider-disconnect-btn>Disconnect</button><small>Remove the OAuth connection. Provider configuration, models, and routing are preserved.</small></div>' : ''}
+    ${isOAuthEdit ? `<section class="provider-oauth-actions" aria-labelledby="provider-oauth-title">
+      <h3 id="provider-oauth-title">OAuth connection</h3>
+      <div class="provider-oauth-action">
+        <button type="button" class="btn btn-secondary" data-provider-reconnect-btn aria-describedby="provider-reconnect-help">Reconnect</button>
+        <small id="provider-reconnect-help">Start a fresh OAuth sign-in. Replaces any saved token for this provider.</small>
+      </div>
+      <div class="provider-oauth-action">
+        <button type="button" class="btn btn-danger" data-provider-disconnect-btn aria-describedby="provider-disconnect-help">Disconnect</button>
+        <small id="provider-disconnect-help">Remove the OAuth connection. Provider configuration, models, and routing are preserved.</small>
+      </div>
+    </section>` : ''}
     <fieldset class="protocol-select" data-protocol-config><legend>Declared native protocols</legend>${['chat','responses','messages'].map(protocol => `<label><input type="checkbox" name="protocol" value="${protocol}" ${selectedProtocols.includes(protocol) ? 'checked' : ''}> ${protocol}</label>`).join('')}<small>Generic providers default to Chat Completions. Declare only surfaces the upstream implements natively.</small></fieldset>
     <label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${provider?.enabled !== false ? 'checked' : ''}> Provider enabled</label>
     ${provider ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm_breaking_change" type="checkbox"> <span>Confirm if the provider name changes; every direct model ID will change.</span></label>' : ''}</div></div>`;
