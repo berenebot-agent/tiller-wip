@@ -18,19 +18,21 @@ import (
 	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 )
 
-// callbackTransport routes the Codex token exchange (auth.openai.com) to a mock
-// while letting all other requests pass through.
+// callbackTransport keeps the OAuth exchange and follow-up discovery local.
 type callbackTransport struct {
 	oauthServer *httptest.Server
 }
 
 func (t *callbackTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if strings.Contains(req.URL.Host, "auth.openai.com") {
+	if req.URL.Host == "auth.openai.com" {
 		req.URL.Scheme = "http"
 		req.URL.Host = strings.TrimPrefix(t.oauthServer.URL, "http://")
 		return http.DefaultTransport.RoundTrip(req)
 	}
-	return http.DefaultTransport.RoundTrip(req)
+	if req.URL.Host == "chatgpt.com" && strings.HasSuffix(req.URL.Path, "/models") {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"models":[]}`))}, nil
+	}
+	return &http.Response{StatusCode: http.StatusNotFound, Body: http.NoBody}, nil
 }
 
 // newHostedCallbackHarness builds a hosted server with one codex provider seeded

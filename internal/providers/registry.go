@@ -673,7 +673,7 @@ func (r *Registry) discoverCodex(ctx context.Context, provider Instance) ([]Mode
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("Codex model discovery returned HTTP %d", resp.StatusCode)
+		return nil, discoveryStatusError(resp.StatusCode)
 	}
 
 	var payload struct {
@@ -1177,7 +1177,7 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 			return nil, readErr
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, fmt.Errorf("model discovery returned HTTP %d", resp.StatusCode)
+			return nil, discoveryStatusError(resp.StatusCode)
 		}
 		var payload struct {
 			Data []struct {
@@ -1552,6 +1552,12 @@ func (r *Registry) discoverCloudflare(ctx context.Context, provider Instance) ([
 	return out, nil
 }
 
+type discoveryStatusError int
+
+func (e discoveryStatusError) Error() string {
+	return fmt.Sprintf("model discovery returned HTTP %d", e)
+}
+
 func (r *Registry) doJSON(req *http.Request, target any) error {
 	resp, err := r.HTTPClient().Do(req)
 	if err != nil {
@@ -1559,7 +1565,7 @@ func (r *Registry) doJSON(req *http.Request, target any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("model discovery returned HTTP %d", resp.StatusCode)
+		return discoveryStatusError(resp.StatusCode)
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(target); err != nil {
 		return fmt.Errorf("decode model catalogue: %w", err)

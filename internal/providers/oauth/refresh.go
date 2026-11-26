@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -14,6 +15,37 @@ var (
 	ErrAuthUnavailable   = errors.New("oauth provider unavailable")
 	errRefreshSuperseded = errors.New("oauth refresh superseded")
 )
+
+// TokenEndpointError carries safe diagnostics from an OAuth token endpoint.
+type TokenEndpointError struct {
+	Status       int
+	InvalidGrant bool
+	Err          error
+}
+
+func (e *TokenEndpointError) Error() string { return e.Err.Error() }
+func (e *TokenEndpointError) Unwrap() error { return e.Err }
+
+func FailureReason(err error) string {
+	switch {
+	case err == nil:
+		return "success"
+	case errors.Is(err, ErrNoToken), errors.Is(err, store.ErrNoOAuthToken):
+		return "not_connected"
+	case errors.Is(err, ErrReconnectRequired):
+		return "reconnect_required"
+	case errors.Is(err, ErrAuthUnavailable):
+		return "unavailable"
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, errRefreshSuperseded), errors.Is(err, store.ErrOAuthGenerationChanged):
+		return "superseded"
+	default:
+		return "error"
+	}
+}
 
 // PersistableRefreshError reports a refresh that rotated durable credentials and
 // then failed on a later step. Token carries the rotated credentials, which must
@@ -55,14 +87,15 @@ type refreshCall struct {
 var callWaitTimeout = 2 * time.Minute
 
 type Manager struct {
-	store *store.Store
-	lead  time.Duration
-	mu    sync.Mutex
-	calls map[string]*refreshCall
+	store  *store.Store
+	lead   time.Duration
+	logger *slog.Logger
+	mu     sync.Mutex
+	calls  map[string]*refreshCall
 }
 
-func NewManager(st *store.Store, refreshLead time.Duration) *Manager {
-	return &Manager{store: st, lead: refreshLead, calls: make(map[string]*refreshCall)}
+func NewManager(st *store.Store, refreshLead time.Duration, logger *slog.Logger) *Manager {
+	return &Manager{store: st, lead: refreshLead, logger: logger, calls: make(map[string]*refreshCall)}
 }
 
 func (m *Manager) Current(ctx context.Context, accountID, providerID string, refresh RefreshFunc) (TokenRecord, error) {
@@ -85,14 +118,20 @@ func (m *Manager) Current(ctx context.Context, accountID, providerID string, ref
 	if record.RefreshToken == "" {
 		return TokenRecord{}, ErrReconnectRequired
 	}
-	return m.refresh(ctx, accountID, providerID, refresh, false)
+	return m.refresh(ctx, accountID, providerID, refresh, false, "")
 }
 
 func (m *Manager) ForceRefresh(ctx context.Context, accountID, providerID string, refresh RefreshFunc) (TokenRecord, error) {
-	return m.refresh(ctx, accountID, providerID, refresh, true)
+	return m.refresh(ctx, accountID, providerID, refresh, true, "")
 }
 
-func (m *Manager) refresh(ctx context.Context, accountID, providerID string, refresh RefreshFunc, force bool) (TokenRecord, error) {
+// RefreshRejected recovers from rejection of a specific access token. An
+// already completed rotation can satisfy a caller holding the old token.
+func (m *Manager) RefreshRejected(ctx context.Context, accountID, providerID string, refresh RefreshFunc, rejected string) (TokenRecord, error) {
+	return m.refresh(ctx, accountID, providerID, refresh, true, rejected)
+}
+
+func (m *Manager) refresh(ctx context.Context, accountID, providerID string, refresh RefreshFunc, force bool, rejected string) (TokenRecord, error) {
 	if refresh == nil {
 		return TokenRecord{}, errors.New("oauth refresh function is required")
 	}
@@ -140,15 +179,24 @@ func (m *Manager) refresh(ctx context.Context, accountID, providerID string, ref
 	// deleted itself. Without this check that caller starts a second, redundant
 	// refresh of credentials that are already fresh.
 	//
-	// Force refresh deliberately skips this: it is the explicit "refresh now"
-	// path (an operator clicking refresh, or a reconnect probe) and must always
-	// reach the provider, however fresh the stored token looks.
-	if !force && loaded && record.RefreshToken != "" && !RefreshNeeded(record, time.Now(), m.lead) {
-		return m.finish(key, call, record, nil)
+	// An explicit force refresh always reaches the token endpoint. Recovery
+	// from rejection can reuse fresh credentials saved by another caller.
+	if loaded && (!force || rejected != "") {
+		switch Classify(record, time.Now()) {
+		case AuthReconnectRequired:
+			return m.finish(key, call, record, ErrReconnectRequired)
+		case AuthUnavailable:
+			return m.finish(key, call, record, ErrAuthUnavailable)
+		}
+		if (!force || record.AccessToken != rejected) && !RefreshNeeded(record, time.Now(), m.lead) {
+			return m.finish(key, call, record, nil)
+		}
 	}
 	generation := record.Generation
 	var rotated *TokenRecord
+	stage := "load"
 	if err == nil {
+		stage = "exchange"
 		response, refreshErr := refresh(ctx, record)
 		if refreshErr != nil {
 			err = refreshErr
@@ -170,23 +218,31 @@ func (m *Manager) refresh(ctx context.Context, accountID, providerID string, ref
 
 	// Keep ownership through the local write so replacement cannot race it.
 	// The upstream refresh runs outside the lock.
+	var stateErr error
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.calls[key] == call {
 		scope := m.store.For(accountID)
 		if err == nil {
+			stage = "persist"
 			record.Generation = generation
 			err = scope.PutOAuthTokenIfGeneration(ctx, TokenToStore(record), generation)
 		} else if rotated != nil {
 			// Best effort, since the refresh is already failing.
 			_ = scope.PutOAuthTokenIfGeneration(ctx, TokenToStore(*rotated), generation)
 		}
-		if loaded && (call.forced || call.forcedWaiters > 0) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		if loaded && ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			var state AuthState
 			switch {
 			case errors.Is(err, ErrReconnectRequired):
-				_ = scope.SetOAuthStateIfGeneration(ctx, providerID, string(AuthReconnectRequired), time.Now(), generation)
-			case errors.Is(err, ErrAuthUnavailable):
-				_ = scope.SetOAuthStateIfGeneration(ctx, providerID, string(AuthUnavailable), time.Now(), generation)
+				state = AuthReconnectRequired
+			case errors.Is(err, ErrAuthUnavailable) && (call.forced || call.forcedWaiters > 0):
+				state = AuthUnavailable
+			}
+			if state != "" {
+				stateErr = scope.SetOAuthStateIfGeneration(ctx, providerID, string(state), time.Now(), generation)
+				if stateErr == nil {
+					record.AuthState = state
+				}
 			}
 		}
 		delete(m.calls, key)
@@ -195,7 +251,31 @@ func (m *Manager) refresh(ctx context.Context, accountID, providerID string, ref
 	}
 	call.record, call.err = record, err
 	close(call.done)
+	m.mu.Unlock()
+	if stateErr != nil {
+		m.logRefresh(ctx, accountID, providerID, force, "persist_state", stateErr)
+	}
+	m.logRefresh(ctx, accountID, providerID, force, stage, err)
 	return record, err
+}
+
+func (m *Manager) logRefresh(ctx context.Context, accountID, providerID string, force bool, stage string, err error) {
+	if m.logger == nil {
+		return
+	}
+	level := slog.LevelInfo
+	if err != nil {
+		level = slog.LevelWarn
+	}
+	attrs := []slog.Attr{
+		slog.String("account_id", accountID), slog.String("provider_id", providerID),
+		slog.Bool("forced", force), slog.String("stage", stage), slog.String("outcome", FailureReason(err)),
+	}
+	var endpointErr *TokenEndpointError
+	if errors.As(err, &endpointErr) {
+		attrs = append(attrs, slog.Int("http_status", endpointErr.Status), slog.Bool("invalid_grant", endpointErr.InvalidGrant))
+	}
+	m.logger.LogAttrs(ctx, level, "provider OAuth token refresh", attrs...)
 }
 
 // finish publishes an already-known result for call and releases its flight.

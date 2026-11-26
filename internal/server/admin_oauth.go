@@ -535,9 +535,7 @@ func (s *Server) storeDeviceToken(ctx context.Context, accountID, id string, gen
 // the provider's credential. Failure is non-fatal: discovery records the error
 // as last_refresh_error and the connection itself stays connected.
 func (s *Server) refreshProviderCatalogue(ctx context.Context, accountID, providerID string) {
-	if err := s.providers.Refresh(ctx, accountID, providerID); err != nil && s.logger != nil {
-		s.logger.Warn("oauth catalogue refresh failed", "provider_id", providerID, "error", err.Error())
-	}
+	_ = s.providers.Refresh(ctx, accountID, providerID)
 }
 
 // refreshProviderCatalogueWait re-discovers for completions that run on an HTTP

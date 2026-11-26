@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net"
-	"regexp"
+	"net/http"
 	"sync"
 	"time"
 
@@ -30,6 +32,7 @@ type Manager struct {
 	store    *store.Store
 	registry *Registry
 	oauth    *oauth.Manager
+	logger   *slog.Logger
 	mu       sync.Mutex
 	locks    map[string]*sync.Mutex
 }
@@ -40,8 +43,8 @@ type Manager struct {
 // this many in flight; the rest queue behind a slot.
 const refreshConcurrency = 4
 
-func NewManager(st *store.Store, registry *Registry) *Manager {
-	return &Manager{store: st, registry: registry, oauth: oauth.NewManager(st, 5*time.Minute), locks: make(map[string]*sync.Mutex)}
+func NewManager(st *store.Store, registry *Registry, logger *slog.Logger) *Manager {
+	return &Manager{store: st, registry: registry, oauth: oauth.NewManager(st, 5*time.Minute, logger), logger: logger, locks: make(map[string]*sync.Mutex)}
 }
 
 func (m *Manager) Registry() *Registry { return m.registry }
@@ -55,7 +58,7 @@ func (m *Manager) ForceOAuthRefresh(ctx context.Context, accountID string, p *In
 	if refresh == nil {
 		return errors.New("not an oauth provider")
 	}
-	record, err := m.oauth.ForceRefresh(ctx, accountID, p.ID, refresh)
+	record, err := m.oauth.RefreshRejected(ctx, accountID, p.ID, refresh, p.Credential)
 	if err == nil {
 		p.Credential = record.AccessToken
 		p.OAuthProviderData = record.ProviderData
@@ -88,7 +91,7 @@ func (m *Manager) Refresh(ctx context.Context, accountID, providerID string) err
 	// Load first: the per-provider lock is only dropped on a successful delete,
 	// so taking it for a provider that does not exist (a refresh of a bogus id)
 	// would leave a permanent entry in the map.
-	provider, err := m.loadProvider(ctx, accountID, providerID)
+	_, err := m.loadProvider(ctx, accountID, providerID)
 	if err != nil {
 		return err
 	}
@@ -99,16 +102,37 @@ func (m *Manager) Refresh(ctx context.Context, accountID, providerID string) err
 	// and a concurrent refresh or admin edit may have changed the endpoint or
 	// credential since it ran. Discovering with a stale instance would apply a
 	// catalogue fetched from the old base URL.
-	provider, err = m.loadProvider(ctx, accountID, providerID)
+	provider, err := m.loadProvider(ctx, accountID, providerID)
 	if err != nil {
 		return err
 	}
-	models, discoverErr := m.registry.Discover(ctx, provider)
-	if discoverErr != nil {
-		_ = m.store.For(accountID).SetProviderRefreshError(ctx, providerID, safeRefreshError(discoverErr))
-		return discoverErr
+	models, err := m.discover(ctx, accountID, provider)
+	if err != nil {
+		message := safeRefreshError(err)
+		if m.logger != nil && !errors.Is(err, context.Canceled) {
+			m.logger.WarnContext(ctx, "provider catalogue refresh failed", "account_id", accountID,
+				"provider_id", providerID, "provider_type", provider.Type, "reason", message)
+		}
+		_ = m.store.For(accountID).SetProviderRefreshError(ctx, providerID, message)
+		return err
 	}
 	return m.store.For(accountID).ApplyCatalogue(ctx, providerID, toCatalogueModels(models))
+}
+
+func (m *Manager) discover(ctx context.Context, accountID string, provider Instance) ([]Model, error) {
+	if err := m.HydrateOAuth(ctx, accountID, &provider); err != nil {
+		return nil, err
+	}
+	models, err := m.registry.Discover(ctx, provider)
+	var status discoveryStatusError
+	if provider.OAuthState != string(oauth.AuthConnected) || !errors.As(err, &status) ||
+		(status != http.StatusUnauthorized && status != http.StatusForbidden) {
+		return models, err
+	}
+	if err := m.ForceOAuthRefresh(ctx, accountID, &provider); err != nil {
+		return nil, err
+	}
+	return m.registry.Discover(ctx, provider)
 }
 
 func (m *Manager) loadProvider(ctx context.Context, accountID, providerID string) (Instance, error) {
@@ -128,7 +152,6 @@ func (m *Manager) loadProvider(ctx context.Context, accountID, providerID string
 	if d, ok := Lookup(p.Type); ok {
 		p.MinOutputTokens = d.MinOutputTokens
 	}
-	m.HydrateOAuth(ctx, accountID, &p)
 	return p, nil
 }
 
@@ -142,24 +165,17 @@ func (m *Manager) HydrateOAuth(ctx context.Context, accountID string, p *Instanc
 	if !ok || descriptor.AuthMode != AuthModeOAuth {
 		return nil
 	}
-	var refresh oauth.RefreshFunc
-	switch p.Type {
-	case codexProviderType:
-		refresh = func(refreshCtx context.Context, current oauth.TokenRecord) (oauth.TokenResponse, error) {
-			return codex.Refresh(refreshCtx, m.registry.HTTPClient(), current.RefreshToken)
-		}
-	case "claude-subscription":
-		refresh = func(refreshCtx context.Context, current oauth.TokenRecord) (oauth.TokenResponse, error) {
-			return claude.Refresh(refreshCtx, m.registry.HTTPClient(), current.RefreshToken)
-		}
-	case "github-copilot":
-		refresh = func(refreshCtx context.Context, current oauth.TokenRecord) (oauth.TokenResponse, error) {
-			return github.Refresh(refreshCtx, m.registry.HTTPClient(), current)
-		}
-	}
-	token, err := m.oauth.Current(ctx, accountID, p.ID, refresh)
+	p.Credential = ""
+	token, err := m.oauth.Current(ctx, accountID, p.ID, m.oauthRefreshFunc(p.Type))
 	if err != nil {
-		p.OAuthState = string(oauth.Classify(token, time.Now().UTC()))
+		switch {
+		case errors.Is(err, oauth.ErrNoToken):
+			p.OAuthState = "not_connected"
+		case errors.Is(err, oauth.ErrReconnectRequired):
+			p.OAuthState = string(oauth.AuthReconnectRequired)
+		default:
+			p.OAuthState = string(oauth.AuthUnavailable)
+		}
 		return err
 	}
 	p.Credential = token.AccessToken
@@ -198,7 +214,7 @@ func (m *Manager) ResolveManualModel(ctx context.Context, accountID, providerID,
 	}
 	model := Model{ID: upstreamID}
 	probeCtx, cancel := context.WithTimeout(ctx, manualModelProbeTimeout)
-	discovered, discoverErr := m.registry.Discover(probeCtx, provider)
+	discovered, discoverErr := m.discover(probeCtx, accountID, provider)
 	cancel()
 	if discoverErr == nil {
 		for _, candidate := range discovered {
@@ -380,9 +396,21 @@ func nullableReasoningCapabilities(rc *ReasoningCapabilities) any {
 	return string(b)
 }
 
-var discoveryHTTPStatus = regexp.MustCompile(`^model discovery returned HTTP ([0-9]{3})$`)
-
 func safeRefreshError(err error) string {
+	var status discoveryStatusError
+	var tokenErr *oauth.TokenEndpointError
+	if errors.As(err, &status) {
+		return fmt.Sprintf("Provider discovery returned HTTP %d.", status)
+	}
+	if errors.Is(err, oauth.ErrReconnectRequired) {
+		return "Provider OAuth connection needs to be renewed. Reconnect the provider."
+	}
+	if errors.Is(err, oauth.ErrNoToken) {
+		return "Provider OAuth connection is missing. Connect the provider."
+	}
+	if errors.Is(err, oauth.ErrAuthUnavailable) || errors.As(err, &tokenErr) {
+		return "Provider OAuth credentials are temporarily unavailable."
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "Provider discovery timed out."
 	}
@@ -395,9 +423,6 @@ func safeRefreshError(err error) string {
 			return "Provider discovery timed out."
 		}
 		return "Provider discovery request failed."
-	}
-	if match := discoveryHTTPStatus.FindStringSubmatch(err.Error()); len(match) == 2 {
-		return "Provider discovery returned HTTP " + match[1] + "."
 	}
 	return "Provider discovery failed."
 }

@@ -1,23 +1,122 @@
 package providers
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/database/dbtest"
+	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
+
+type catalogueTestTransport func(*http.Request) (*http.Response, error)
+
+func (f catalogueTestTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestClaudeCatalogueOAuthRecovery(t *testing.T) {
+	t.Parallel()
+	for _, expired := range []bool{false, true} {
+		name := "rejected access token"
+		if expired {
+			name = "rejected refresh token"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			db, err := dbtest.Open(ctx, filepath.Join(t.TempDir(), "router.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			st := store.New(db.SQL)
+			sc := st.For(database.LocalAccountID)
+			if err := sc.CreateProvider(ctx, store.CreateProviderInput{
+				ID: "claude-test", Name: "claude-test", Type: "claude-subscription",
+				BaseURL: "https://api.anthropic.com/v1", Enabled: true, Protocols: EncodeProtocols([]Protocol{ProtocolMessages}),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now()
+			expiresAt := now.Add(time.Hour)
+			if expired {
+				expiresAt = now.Add(-time.Hour)
+			}
+			if err := sc.PutOAuthToken(ctx, oauth.TokenToStore(oauth.TokenRecord{
+				ProviderID: "claude-test", AccessToken: "old-access-secret", RefreshToken: "old-refresh-secret",
+				TokenType: "Bearer", ExpiresAt: &expiresAt, AuthState: oauth.AuthConnected, CreatedAt: now, UpdatedAt: now,
+			})); err != nil {
+				t.Fatal(err)
+			}
+			var exchanges, discoveries int
+			registry := NewRegistry()
+			registry.SetHTTPClient(&http.Client{Transport: catalogueTestTransport(func(r *http.Request) (*http.Response, error) {
+				var status int
+				var body string
+				switch r.URL.Path {
+				case "/v1/oauth/token":
+					exchanges++
+					status, body = 200, `{"access_token":"new-access-secret","expires_in":3600}`
+					if expired {
+						status, body = 400, `{"error":"invalid_grant","error_description":"upstream-private-body"}`
+					}
+				case "/v1/models":
+					discoveries++
+					status, body = 401, "{}"
+					if r.Header.Get("Authorization") == "Bearer new-access-secret" {
+						status, body = 200, `{"data":[{"id":"test-model"}]}`
+					}
+				default:
+					t.Fatalf("unexpected upstream path: %s", r.URL.Path)
+				}
+				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}, nil
+			})})
+			var logs bytes.Buffer
+			m := NewManager(st, registry, slog.New(slog.NewJSONHandler(&logs, nil)))
+			err = m.Refresh(ctx, database.LocalAccountID, "claude-test")
+			if !expired {
+				if err != nil || exchanges != 1 || discoveries != 2 {
+					t.Fatalf("refresh result %v, %d exchanges, %d discoveries", err, exchanges, discoveries)
+				}
+				return
+			}
+			if !errors.Is(err, oauth.ErrReconnectRequired) {
+				t.Fatalf("refresh result %v, want reconnect required", err)
+			}
+			if err := m.Refresh(ctx, database.LocalAccountID, "claude-test"); !errors.Is(err, oauth.ErrReconnectRequired) {
+				t.Fatalf("second refresh result %v, want reconnect required", err)
+			}
+			if exchanges != 1 || discoveries != 0 {
+				t.Fatalf("expected one token exchange and no discovery requests, got %d and %d", exchanges, discoveries)
+			}
+			for _, diagnostic := range []string{`"stage":"exchange"`, `"http_status":400`, `"invalid_grant":true`, `"outcome":"reconnect_required"`} {
+				if !strings.Contains(logs.String(), diagnostic) {
+					t.Errorf("missing diagnostic %s", diagnostic)
+				}
+			}
+			for _, secret := range []string{"old-access-secret", "old-refresh-secret", "upstream-private-body"} {
+				if strings.Contains(logs.String(), secret) {
+					t.Error("OAuth log exposed upstream private data")
+				}
+			}
+		})
+	}
+}
 
 func TestSafeRefreshErrorDoesNotExposeRequestDetails(t *testing.T) {
 	t.Parallel()
@@ -28,7 +127,7 @@ func TestSafeRefreshErrorDoesNotExposeRequestDetails(t *testing.T) {
 	}{
 		{name: "deadline", err: context.DeadlineExceeded, want: "Provider discovery timed out."},
 		{name: "cancelled", err: context.Canceled, want: "Provider discovery was cancelled."},
-		{name: "http status", err: errors.New("model discovery returned HTTP 401"), want: "Provider discovery returned HTTP 401."},
+		{name: "http status", err: discoveryStatusError(http.StatusUnauthorized), want: "Provider discovery returned HTTP 401."},
 		{name: "decode", err: errors.New(`decode model catalogue: invalid character 's' looking for beginning of value`), want: "Provider discovery failed."},
 		{name: "transport URL", err: &url.Error{Op: "Get", URL: "https://example.test/models?api_key=secret", Err: fmt.Errorf("dial failed")}, want: "Provider discovery request failed."},
 	}
@@ -80,7 +179,7 @@ func TestRefreshDueRefreshesOverdueProviders(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := NewManager(store.New(db.SQL), NewRegistry())
+	m := NewManager(store.New(db.SQL), NewRegistry(), nil)
 	m.refreshDue(context.Background())
 
 	deadline := time.Now().Add(30 * time.Second)
@@ -160,7 +259,7 @@ func TestRefreshReloadsProviderUnderLock(t *testing.T) {
 		"provider-reload", "reload", "generic-openai", upstream.URL+"/stale/v1", nil, 1, EncodeProtocols([]Protocol{ProtocolChat}), now, now); err != nil {
 		t.Fatal(err)
 	}
-	m := NewManager(store.New(db.SQL), NewRegistry())
+	m := NewManager(store.New(db.SQL), NewRegistry(), nil)
 
 	// Hold the per-provider lock so the refresh is parked after its pre-lock
 	// existence check, then change the endpoint underneath it.
@@ -244,7 +343,7 @@ func TestRefreshDueBoundsDiscoveryConcurrency(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	manager := NewManager(store.New(db.SQL), NewRegistry())
+	manager := NewManager(store.New(db.SQL), NewRegistry(), nil)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

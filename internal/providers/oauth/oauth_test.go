@@ -244,7 +244,7 @@ func TestForceRefreshTransitionsAuthStateOnFailure(t *testing.T) {
 	if err := st.PutOAuthToken(context.Background(), TokenToStore(TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "refresh", TokenType: "Bearer", ExpiresAt: &expired, AuthState: AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()})); err != nil {
 		t.Fatal(err)
 	}
-	manager := NewManager(store.New(db.SQL), time.Minute)
+	manager := NewManager(store.New(db.SQL), time.Minute, nil)
 
 	refreshReconnect := func(context.Context, TokenRecord) (TokenResponse, error) {
 		return TokenResponse{}, ErrReconnectRequired
@@ -296,6 +296,13 @@ func TestForceRefreshTransitionsAuthStateOnFailure(t *testing.T) {
 	if record.AccessToken != "new" {
 		t.Fatalf("access_token = %q, want new", record.AccessToken)
 	}
+	record, err = manager.RefreshRejected(context.Background(), database.LocalAccountID, "provider-1", func(context.Context, TokenRecord) (TokenResponse, error) {
+		t.Fatal("late rejection of the old token should reuse the saved rotation")
+		return TokenResponse{}, nil
+	}, "old")
+	if err != nil || record.AccessToken != "new" {
+		t.Fatalf("rejection recovery failed: %v", err)
+	}
 }
 
 // TestRefreshManagerDeduplicatesConcurrentRefresh asserts the refresh
@@ -325,7 +332,7 @@ func TestRefreshManagerDeduplicatesConcurrentRefresh(t *testing.T) {
 	if err := st.PutOAuthToken(context.Background(), TokenToStore(TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "refresh", TokenType: "Bearer", ExpiresAt: &expired, AuthState: AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()})); err != nil {
 		t.Fatal(err)
 	}
-	manager := NewManager(store.New(db.SQL), time.Minute)
+	manager := NewManager(store.New(db.SQL), time.Minute, nil)
 	var calls atomic.Int32
 	refresh := func(context.Context, TokenRecord) (TokenResponse, error) {
 		calls.Add(1)
@@ -386,7 +393,7 @@ func TestRefreshManagerSkipsRefreshWhenFlightAlreadyCompleted(t *testing.T) {
 	if err := st.PutOAuthToken(context.Background(), TokenToStore(TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "refresh", TokenType: "Bearer", ExpiresAt: &expired, AuthState: AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()})); err != nil {
 		t.Fatal(err)
 	}
-	manager := NewManager(store.New(db.SQL), time.Minute)
+	manager := NewManager(store.New(db.SQL), time.Minute, nil)
 	var calls atomic.Int32
 	refresh := func(context.Context, TokenRecord) (TokenResponse, error) {
 		calls.Add(1)
@@ -403,7 +410,7 @@ func TestRefreshManagerSkipsRefreshWhenFlightAlreadyCompleted(t *testing.T) {
 	if first.AccessToken != "new" {
 		t.Fatalf("first access token = %q", first.AccessToken)
 	}
-	second, err := manager.refresh(context.Background(), database.LocalAccountID, "provider-1", refresh, false)
+	second, err := manager.refresh(context.Background(), database.LocalAccountID, "provider-1", refresh, false, "")
 	if err != nil {
 		t.Fatalf("second refresh: %v", err)
 	}
@@ -445,7 +452,7 @@ func TestForceRefreshTransientOnContextCancellation(t *testing.T) {
 	if err := st.PutOAuthToken(context.Background(), TokenToStore(TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "refresh", TokenType: "Bearer", ExpiresAt: &expired, AuthState: AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()})); err != nil {
 		t.Fatal(err)
 	}
-	manager := NewManager(store.New(db.SQL), time.Minute)
+	manager := NewManager(store.New(db.SQL), time.Minute, nil)
 
 	// Refresh that fails with context cancellation.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -483,7 +490,7 @@ func TestOAuthWritersRemainDisconnectedAcrossRaces(t *testing.T) {
 	if err := st.PutOAuthToken(context.Background(), TokenToStore(TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "refresh", ExpiresAt: &expired, AuthState: AuthConnected})); err != nil {
 		t.Fatal(err)
 	}
-	manager := NewManager(store.New(db.SQL), time.Minute)
+	manager := NewManager(store.New(db.SQL), time.Minute, nil)
 	started := make(chan struct{})
 	release := make(chan struct{})
 	refreshDone := make(chan error, 1)
@@ -549,7 +556,7 @@ func TestPersistableRefreshErrorStoresRotatedCredentials(t *testing.T) {
 	if err := st.PutOAuthToken(context.Background(), TokenToStore(TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "old-refresh", TokenType: "Bearer", ExpiresAt: &expired, AuthState: AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()})); err != nil {
 		t.Fatal(err)
 	}
-	manager := NewManager(store.New(db.SQL), time.Minute)
+	manager := NewManager(store.New(db.SQL), time.Minute, nil)
 	transient := errors.New("copilot endpoint unavailable")
 	refresh := func(context.Context, TokenRecord) (TokenResponse, error) {
 		return TokenResponse{}, &PersistableRefreshError{
@@ -594,7 +601,7 @@ func TestPersistableRefreshErrorRespectsDisconnect(t *testing.T) {
 	if err := st.PutOAuthToken(context.Background(), TokenToStore(TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "old-refresh", TokenType: "Bearer", ExpiresAt: &expired, AuthState: AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()})); err != nil {
 		t.Fatal(err)
 	}
-	manager := NewManager(store.New(db.SQL), time.Minute)
+	manager := NewManager(store.New(db.SQL), time.Minute, nil)
 	refresh := func(ctx context.Context, _ TokenRecord) (TokenResponse, error) {
 		// Simulate the disconnect landing while the refresh is in flight.
 		if _, err := st.AdvanceOAuthGeneration(ctx, "provider-1"); err != nil {
@@ -646,7 +653,7 @@ func TestRefreshManagerAbandonsStuckCall(t *testing.T) {
 		return TokenResponse{AccessToken: "new", RefreshToken: "rotated", ExpiresIn: 3600}, nil
 	}
 	t.Run("waiter timeout stays retryable", func(t *testing.T) {
-		manager := NewManager(store.New(db.SQL), time.Minute)
+		manager := NewManager(store.New(db.SQL), time.Minute, nil)
 		manager.calls[k] = &refreshCall{done: make(chan struct{}), started: time.Now().Add(time.Second - callWaitTimeout)}
 		_, err := manager.ForceRefresh(context.Background(), database.LocalAccountID, "provider-1", replacement)
 		if !errors.Is(err, context.DeadlineExceeded) {
@@ -668,7 +675,7 @@ func TestRefreshManagerAbandonsStuckCall(t *testing.T) {
 		{name: "terminal failure", err: ErrReconnectRequired},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			manager := NewManager(store.New(db.SQL), time.Minute)
+			manager := NewManager(store.New(db.SQL), time.Minute, nil)
 			started, release := make(chan struct{}), make(chan struct{})
 			finished := make(chan error, 1)
 			go func() {

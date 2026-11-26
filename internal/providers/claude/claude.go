@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -128,11 +129,15 @@ func tokenRequest(ctx context.Context, client *http.Client, method, endpoint, co
 		var errResp struct {
 			Error string `json:"error"`
 		}
-		_ = json.NewDecoder(resp.Body).Decode(&errResp)
-		if errResp.Error == "invalid_grant" || resp.StatusCode == 401 || resp.StatusCode == 403 {
-			return oauth.TokenResponse{}, oauth.ErrReconnectRequired
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&errResp)
+		tokenErr := &oauth.TokenEndpointError{
+			Status: resp.StatusCode, InvalidGrant: errResp.Error == "invalid_grant",
+			Err: errors.New("claude OAuth token request failed"),
 		}
-		return oauth.TokenResponse{}, errors.New("claude OAuth token request failed")
+		if tokenErr.InvalidGrant || resp.StatusCode == 401 || resp.StatusCode == 403 {
+			tokenErr.Err = oauth.ErrReconnectRequired
+		}
+		return oauth.TokenResponse{}, tokenErr
 	}
 	var token struct {
 		AccessToken  string `json:"access_token"`

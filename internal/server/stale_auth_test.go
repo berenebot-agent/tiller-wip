@@ -20,17 +20,20 @@ import (
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
-// routingTransport redirects OAuth token requests (to auth.openai.com) to a
-// mock OAuth server while letting all other requests pass through.
+// routingTransport redirects OAuth token requests to a mock and only forwards
+// traffic to the local test servers.
 type routingTransport struct {
 	oauthServer *httptest.Server
 }
 
 func (t *routingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if strings.Contains(req.URL.Host, "auth.openai.com") {
+	switch req.URL.Hostname() {
+	case "auth.openai.com":
 		req.URL.Scheme = "http"
 		req.URL.Host = strings.TrimPrefix(t.oauthServer.URL, "http://")
-		return http.DefaultTransport.RoundTrip(req)
+	case "127.0.0.1":
+	default:
+		return &http.Response{StatusCode: http.StatusNotFound, Body: http.NoBody}, nil
 	}
 	return http.DefaultTransport.RoundTrip(req)
 }
@@ -175,6 +178,35 @@ func TestStaleAuthRecovery(t *testing.T) {
 	}
 }
 
+func TestExpiredOAuthRejectsInferenceBeforeUpstream(t *testing.T) {
+	t.Parallel()
+	api, secret, providerID, cleanup := mockOAuthAndUpstream(t)
+	defer cleanup()
+	var exchanges atomic.Int32
+	rejecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		exchanges.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+	}))
+	t.Cleanup(rejecting.Close)
+	api.server.providers.Registry().SetHTTPClient(&http.Client{Transport: &routingTransport{oauthServer: rejecting}})
+	record := getOAuthToken(t, api.server.db, providerID)
+	expired := time.Now().Add(-time.Hour)
+	record.ExpiresAt = &expired
+	putOAuthToken(t, api.server.db, record)
+
+	for i := 0; i < 2; i++ {
+		resp, body := clientCall(t, api.base, secret, "/v1/responses", map[string]any{"model": "codex-mock/gpt-5.6-sol", "input": "hello"})
+		detail, _ := body["error"].(map[string]any)
+		if resp.StatusCode != http.StatusServiceUnavailable || detail["code"] != "provider_oauth_reconnect_required" {
+			t.Fatalf("expected OAuth reconnect error, got status %d", resp.StatusCode)
+		}
+	}
+	if got := exchanges.Load(); got != 1 {
+		t.Fatalf("OAuth exchanges = %d, want 1", got)
+	}
+}
+
 // TestStaleAuthRecoveryPreservesTokenAfterRestart verifies that a persisted
 // token survives a router restart and the status endpoint reports "connected".
 func TestStaleAuthRecoveryPreservesTokenAfterRestart(t *testing.T) {
@@ -230,7 +262,7 @@ func TestForceRefreshTransitionsStateOnDeadToken(t *testing.T) {
 
 	registry := providers.NewRegistry()
 	registry.SetHTTPClient(&http.Client{Transport: &routingTransport{oauthServer: oauthServer}})
-	mgr := providers.NewManager(store.New(db.SQL), registry)
+	mgr := providers.NewManager(store.New(db.SQL), registry, nil)
 
 	err = mgr.ForceOAuthRefresh(context.Background(), database.LocalAccountID, &providers.Instance{ID: "provider-dead", Type: "codex-subscription"})
 	if err == nil {

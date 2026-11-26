@@ -48,6 +48,12 @@ func fixedUpstreamErrorMessage(class string) string {
 		return "The request was rejected as invalid"
 	case "upstream_error":
 		return "The upstream provider returned an error"
+	case "provider_oauth_not_connected":
+		return "The upstream provider needs to be connected through OAuth"
+	case "provider_oauth_reconnect_required":
+		return "The upstream provider needs to be reconnected through OAuth"
+	case "provider_oauth_unavailable":
+		return "The upstream provider's OAuth credentials are temporarily unavailable"
 	case "protocol_unavailable":
 		return "No compatible protocol is available for this request"
 	case "free_model_requires_keyless":

@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -35,7 +36,7 @@ func TestRefreshInvalidGrantReturnsReconnectRequired(t *testing.T) {
 
 	client := &http.Client{Transport: &routingTransport{server: upstream}, Timeout: 5 * time.Second}
 	_, err := Refresh(context.Background(), client, "dead-refresh-token")
-	if err != oauth.ErrReconnectRequired {
+	if !errors.Is(err, oauth.ErrReconnectRequired) {
 		t.Fatalf("invalid_grant: err = %v, want ErrReconnectRequired", err)
 	}
 }
@@ -51,7 +52,7 @@ func TestRefresh401ReturnsReconnectRequired(t *testing.T) {
 
 	client := &http.Client{Transport: &routingTransport{server: upstream}, Timeout: 5 * time.Second}
 	_, err := Refresh(context.Background(), client, "dead-refresh-token")
-	if err != oauth.ErrReconnectRequired {
+	if !errors.Is(err, oauth.ErrReconnectRequired) {
 		t.Fatalf("401: err = %v, want ErrReconnectRequired", err)
 	}
 }
@@ -70,7 +71,7 @@ func TestRefresh500StaysTransient(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if err == oauth.ErrReconnectRequired {
+	if errors.Is(err, oauth.ErrReconnectRequired) {
 		t.Fatal("500 should not return ErrReconnectRequired")
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/providers"
+	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
@@ -813,7 +814,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	translationFailureClass := ""
 	nonTranslationFailure := false
 	terminalPreflightClass := ""
-	oauthRefreshed := make(map[string]bool)
+	oauthRefreshAttempted := make(map[string]bool)
 	cooldownSeconds := 0
 	// Cooldown is scoped to ordered-fallback virtual routes. Fixed virtual routes
 	// and direct real-model routes never read the setting, so cooldownSeconds
@@ -882,6 +883,19 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if !candidate.Available {
 				nonTranslationFailure = true
 				s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: "unavailable"}, i < len(candidates)-1)
+				continue
+			}
+			if state := candidate.Provider.OAuthState; state != "" && state != string(oauth.AuthConnected) {
+				class := "provider_oauth_" + state
+				message := fixedUpstreamErrorMessage(class)
+				nonTranslationFailure = true
+				s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: class, errorMessage: &message}, i < len(candidates)-1)
+				if !route.Virtual {
+					row.httpStatus = http.StatusServiceUnavailable
+					row.errorText, row.errorMessage = &class, &message
+					inferenceError(w, row.httpStatus, "service_unavailable_error", class, message, incoming == providers.ProtocolMessages)
+					return
+				}
 				continue
 			}
 			if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && !bypass && s.cooldown.cooled(row.accountID, candidate.ProviderModelID, attemptStart) {
@@ -1242,9 +1256,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				nonTranslationFailure = true
 				// Stale-auth recovery: on 401/403 from an OAuth provider, force a
 				// token refresh once per request and retry the same target before
-				// falling through to normal virtual fallback. ForceOAuthRefresh
-				// transitions auth_state on failure, so a dead refresh token surfaces
-				// as reconnect_required without further handling here.
+				// falling through to normal virtual fallback.
 				//
 				// Cooldown is recorded only AFTER this recovery path: if the refresh
 				// succeeds and the same target is retried, the retry must not see the
@@ -1252,10 +1264,16 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// cooldown opens on that retry's failure. If the refresh fails, the
 				// target becomes unavailable and cooldown may open on the persistent
 				// failure.
-				if !oauthRefreshed[candidate.Provider.ID] && (response.StatusCode == 401 || response.StatusCode == 403) {
+				if !oauthRefreshAttempted[candidate.Provider.ID] && (response.StatusCode == 401 || response.StatusCode == 403) {
 					if descriptor, ok := providers.Lookup(candidate.Provider.Type); ok && descriptor.AuthMode == providers.AuthModeOAuth {
-						if refreshErr := s.providers.ForceOAuthRefresh(r.Context(), identity.AccountID, &candidate.Provider); refreshErr == nil {
-							oauthRefreshed[candidate.Provider.ID] = true
+						oauthRefreshAttempted[candidate.Provider.ID] = true
+						refreshErr := s.providers.ForceOAuthRefresh(r.Context(), identity.AccountID, &candidate.Provider)
+						if s.logger != nil {
+							s.logger.InfoContext(r.Context(), "provider OAuth inference recovery", "account_id", identity.AccountID,
+								"provider_id", candidate.Provider.ID, "client_request_id", row.clientRequestID,
+								"http_status", response.StatusCode, "outcome", oauth.FailureReason(refreshErr))
+						}
+						if refreshErr == nil {
 							// The credentials just rotated, so this failure is
 							// the router's to repair, not evidence the target is
 							// unhealthy: mark it after the refresh succeeds so
@@ -1273,6 +1291,23 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 							}
 							i--
 							continue
+						}
+						if errors.Is(refreshErr, oauth.ErrReconnectRequired) {
+							for j := range candidates {
+								if candidates[j].Provider.ID == candidate.Provider.ID {
+									candidates[j].Provider.OAuthState = string(oauth.AuthReconnectRequired)
+								}
+							}
+							if !route.Virtual {
+								const code = "provider_oauth_reconnect_required"
+								message := fixedUpstreamErrorMessage(code)
+								row.httpStatus = http.StatusServiceUnavailable
+								row.errorText, row.errorMessage = strPtr(code), &message
+								if !failAfterCommit(code) {
+									inferenceError(w, row.httpStatus, "service_unavailable_error", code, message, incoming == providers.ProtocolMessages)
+								}
+								return
+							}
 						}
 					}
 				}
